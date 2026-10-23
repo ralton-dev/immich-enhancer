@@ -1,10 +1,11 @@
 # immich-enhancer
 
-A batch job that upscales old, low-resolution photos in [Immich](https://immich.app) and
-restores the faces in them. You tag a photo `enhance` in Immich. On its next run the job
-uploads an enhanced copy as a new asset and stacks it on top of the original, so the timeline
-shows the better picture with the original underneath. **The original is never edited,
-replaced or re-encoded.**
+A batch job that enlarges old, low-resolution photos in [Immich](https://immich.app). You tag
+a photo `enhance` in Immich. On its next run the job uploads two copies of it as new assets,
+each four times as wide and as tall (twice, for a photo over 1 MP): one upscaled by a
+Real-ESRGAN network, and one pixel-doubled, with every pixel of the original a square block.
+It stacks both with the original, the upscale on top, so you can compare all three in Immich
+and keep the one you prefer. **The original is never edited, replaced or re-encoded.**
 
 It runs as a Kubernetes CronJob in a homelab cluster. It has no web interface and listens on
 no port.
@@ -18,49 +19,57 @@ One run, in order (`immich_enhancer/run.py`):
    version, with a warning if it is not v3. Read the API key's permissions
    (`GET /api/api-keys/me`); a key that lacks one stops the run before any write and names
    what is missing (see [The API key](#the-api-key)).
-2. Create any of the five tags that do not exist yet. Read the whole `enhance` queue, every
+2. Create any of the six tags that do not exist yet. Read the whole `enhance` queue, every
    page, before touching any of it.
 3. For each queued asset, skip what the job should not touch:
-   - an asset already tagged `enhanced` or `enhanced-source`: it is the job's own work, so
-     the stray `enhance` tag is removed and nothing else changes;
+   - an asset already tagged `enhanced`, `pixel-x4` or `enhanced-source`: it is the job's
+     own work, so the stray `enhance` tag is removed and nothing else changes;
    - a video, or any file type except JPEG and PNG (in v1);
    - an asset that is already in a stack;
-   - a photo edited inside Immich: the download is the unedited original, so an enhanced
-     copy on top would undo the edit;
+   - a photo edited inside Immich: the download is the unedited original, so copies on top
+     of it would undo the edit;
    - a file whose bytes turn out not to be JPEG or PNG, such as a WebP named `.jpg`. An MPO
-     (a JPEG with extra frames) is not skipped: its first frame is enhanced;
-   - a photo the job could only re-encode. It gets no upscaling (over 4 MP, or held back by
-     `ENHANCER_MAX_OUTPUT_MP`) and no face is restored in it, because none was found or the
-     face pass is off. A plain re-encode stacked in front of the original would only put a
-     slightly worse copy on top. The log says "nothing to enhance: no upscale at this size
-     (x1) and no face restored".
+     (a JPEG with extra frames) is not skipped: its first frame is used;
+   - a photo too large to enlarge: over 4 MP, or held to its own size by
+     `ENHANCER_MAX_OUTPUT_MP`. Both copies would only re-encode the original at its own
+     size. The log says "nothing to enhance: no upscale at this size".
 
-   The last two are known only after the pipeline has run. Apart from the first case, a
-   skipped asset moves from `enhance` to `enhance-skipped` and the reason is logged.
-4. Download the original, turn it upright from its EXIF orientation, and upscale it:
-   - ×4 up to 1 MP, ×2 up to 4 MP, ×1 (faces only) above that;
-   - a scale whose output would exceed `ENHANCER_MAX_OUTPUT_MP` steps down. ×1 may exceed
-     it, because the output is never smaller than the original;
-   - inference runs in tiles, so memory depends on the tile size, not the photo.
-5. Restore faces. [facexlib](https://github.com/xinntao/facexlib)'s RetinaFace finds and
-   aligns them, GFPGAN v1.4 restores each one, and ParseNet's face mask blends it back in.
-   In a photo over 2 MP, faces are found on a 2 MP copy.
-6. Write a JPEG that carries the original's EXIF (dates and GPS included) with `Orientation`
-   reset to 1 and the embedded thumbnail dropped. A transparent PNG is composited on white,
-   a greyscale photo stays greyscale, and the colour profile is kept unless it is CMYK.
-7. Upload it as `<name>-enhanced.jpg`, with the original's `fileCreatedAt`,
-   `fileModifiedAt` and favourite flag, so it lands at the same place in the timeline.
-   If Immich already holds those exact bytes, because an earlier run died after its upload,
-   the job finishes that asset rather than failing.
-8. Stack the new asset on the original as primary, and add it to every album the original
-   is in. An album the job may not add to, such as a shared album Ben can only view, gets a
-   warning, not a failure.
+   The last two are known only once the job has downloaded and opened the photo. Apart from
+   the first case, a skipped asset moves from `enhance` to `enhance-skipped` and the reason
+   is logged.
+4. Download the original, turn it upright from its EXIF orientation, and choose the scale:
+   - ×4 up to 1 MP, ×2 up to 4 MP, and nothing above that (the last skip above);
+   - a scale whose output would exceed `ENHANCER_MAX_OUTPUT_MP` steps down from ×4 to ×2,
+     and from ×2 to that skip.
+5. Make two copies at that scale, the same size as each other:
+   - **the upscale**, by the `ENHANCER_SR_MODEL` network. It runs in tiles, so memory
+     depends on the tile size, not the photo;
+   - **the pixel copy**, enlarged by nearest neighbour: every pixel of the original becomes
+     a square block. Nothing is smoothed or invented, so it shows the original as it was,
+     only bigger.
+6. Write each as a JPEG at `ENHANCER_JPEG_QUALITY`, carrying the original's EXIF (dates and
+   GPS included) with `Orientation` reset to 1, the size tags updated and the embedded
+   thumbnail dropped. A transparent PNG is composited on white, a greyscale photo stays
+   greyscale, and the colour profile is kept unless it is CMYK.
+7. Upload them as `<name>-enhanced.jpg` and `<name>-x4.jpg` (`<name>-x2.jpg` at ×2), each
+   with the original's `fileCreatedAt`, `fileModifiedAt` and favourite flag, so they land
+   at the same place in the timeline. If Immich already holds a copy's exact bytes, because
+   an earlier run died after uploading it, the job uses that asset rather than failing.
+8. Stack all three: the upscale on top as primary, then the pixel copy, then the original.
+   Add both copies to every album the original is in. An album the job may not add to, such
+   as a shared album Ben can only view, gets a warning, not a failure.
 9. Move the tags. The original goes from `enhance` to `enhanced-source`, and loses any
-   `enhance-failed` or `enhance-skipped` left over from an earlier try. The new asset gets
-   `enhanced`.
-10. Check the timeline. Wait up to 20 s for Immich to read the new file's metadata, then
+   `enhance-failed` or `enhance-skipped` left over from an earlier try. The upscale gets
+   `enhanced` and the pixel copy `pixel-x4`. A picture so flat that the network adds
+   nothing, such as a blank white page, makes the two copies the same file; Immich keeps
+   one asset, and it gets both tags.
+10. Check the timeline. For each copy, wait up to 20 s for Immich to read its metadata, then
     compare its `localDateTime` and `fileCreatedAt` with the original's. A difference is
     logged as a WARNING; it never fails the asset.
+
+Choosing between the three is done by hand in Immich: open the stack, keep the one you
+prefer and delete the others, or make another one the primary. The job never changes a
+stack once it has made it.
 
 An asset whose enhancement fails moves from `enhance` to `enhance-failed`, and the run
 carries on with the next one. The loop stops early once `ENHANCER_MAX_PER_RUN` assets have
@@ -73,11 +82,12 @@ Logs go to stdout, where Loki collects them. Each enhanced photo logs one line f
 pipeline:
 
 ```
-enhanced scale=4 faces=1 in=120x160 out=480x640 seconds=… load_seconds=… peak_rss_mib=… sr_model=RealESRGAN_x4plus
+enhanced scale=4 in=120x160 out=480x640 seconds=… load_seconds=… peak_rss_mib=… sr_model=RealESRGAN_x4plus
 ```
 
-`load_seconds` is the share of `seconds` spent loading models. Models load on first use and
-stay loaded for the rest of the run, so the run's first photo pays most of it.
+`out` is the size of both copies. `load_seconds` is the share of `seconds` spent loading the
+model. It loads on first use and stays loaded for the rest of the run, so the run's first
+photo pays most of it.
 
 Every run ends with one JSON summary line, including a run that stops at its settings:
 
@@ -113,21 +123,21 @@ that is set but empty is an error. Booleans are on only for the exact string `tr
 | `IMMICH_API_KEY` | required | **yes** | Immich API key, sent as `x-api-key`. Keys are per user, so the job sees only that user's assets. Permissions: see [The API key](#the-api-key). |
 | `APP_VERSION` | required | no | The image tag this pod runs (`sha-<full commit sha>`), set by the CronJob. It appears in the log and the summary line. |
 | `ENHANCER_QUEUE_TAG` | `enhance` | no | Tag that queues a photo. |
-| `ENHANCER_DONE_TAG` | `enhanced` | no | Tag on each new, enhanced asset. |
+| `ENHANCER_DONE_TAG` | `enhanced` | no | Tag on each new upscaled copy, the network's output. |
+| `ENHANCER_PIXEL_TAG` | `pixel-x4` | no | Tag on each new pixel-doubled copy. It keeps this name in the ×2 band, where the copy's file name ends `-x2`. |
 | `ENHANCER_SOURCE_TAG` | `enhanced-source` | no | Tag the original carries once its enhanced copy exists. |
 | `ENHANCER_FAILED_TAG` | `enhance-failed` | no | Tag for a photo whose enhancement failed. |
 | `ENHANCER_SKIPPED_TAG` | `enhance-skipped` | no | Tag for a photo the job skipped (see [How it works](#how-it-works)); the reason is in the log. |
 | `ENHANCER_MAX_PER_RUN` | `10` | no | Most assets attempted in one run (successes plus failures; skips do not count). At least 1. |
 | `ENHANCER_TIME_BUDGET_S` | `2700` | no | No new asset is started this many seconds after the run began. At least 1. |
-| `ENHANCER_MAX_OUTPUT_MP` | `16` | no | Cap on upscaled output, in megapixels. A scale that would exceed it steps down; ×1 output may exceed it. At least 1. |
-| `ENHANCER_SR_MODEL` | `RealESRGAN_x4plus` | no | Upscaler: `RealESRGAN_x4plus` (quality) or `realesr-general-x4v3` (compact, about 10× faster). Both are in the image. Any other value is a configuration error. |
-| `ENHANCER_FACE_RESTORE` | `true` | no | Run the face pass. Any value other than `true` turns it off. |
+| `ENHANCER_MAX_OUTPUT_MP` | `16` | no | Cap on the copies' size, in megapixels. A scale that would exceed it steps down from ×4 to ×2; a photo that would exceed it even at ×2 is skipped. At least 1. |
+| `ENHANCER_SR_MODEL` | `RealESRGAN_x4plus` | no | Upscaler for the `enhanced` copy: `RealESRGAN_x4plus` (quality) or `realesr-general-x4v3` (compact, about 10× faster). Both are in the image. Any other value is a configuration error. |
 | `ENHANCER_TILE` | `256` | no | Tile size for upscaling, in input pixels. Each tile also takes 16 px of context from its neighbours. At least 64. |
-| `ENHANCER_THREADS` | `4` | no | CPU threads for PyTorch and OpenCV (`torch.set_num_threads`, `cv2.setNumThreads`). At least 1. |
-| `ENHANCER_MODEL_DIR` | `/opt/models` | no | Where the weights are. facexlib's two are in its `facexlib/` subdirectory. |
+| `ENHANCER_THREADS` | `4` | no | CPU threads for PyTorch (`torch.set_num_threads`). At least 1. |
+| `ENHANCER_MODEL_DIR` | `/opt/models` | no | Where the weights are: `<ENHANCER_SR_MODEL>.pth` for each upscaler. |
 | `ENHANCER_WORK_DIR` | `/tmp/enhancer` | no | Scratch space for downloads and outputs. It is created if missing and must be writable; each asset's files are deleted when it is done. |
-| `ENHANCER_JPEG_QUALITY` | `92` | no | Quality of the enhanced JPEG, 1 to 100. |
-| `ENHANCER_DRY_RUN` | `false` | no | `true` creates any of the five tags that are missing (`PUT /tags`), then downloads and enhances each queued photo. It uploads nothing, creates no stack, adds nothing to an album and changes no asset's tags. A photo it would have uploaded counts as succeeded. |
+| `ENHANCER_JPEG_QUALITY` | `92` | no | Quality of both JPEGs, 1 to 100. |
+| `ENHANCER_DRY_RUN` | `false` | no | `true` creates any of the six tags that are missing (`PUT /tags`), then downloads each queued photo and makes both copies. It uploads nothing, creates no stack, adds nothing to an album and changes no asset's tags. A photo it would have uploaded counts as succeeded. |
 | `ENHANCER_LOG_LEVEL` | `INFO` | no | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case. At `DEBUG`, every HTTP request is logged too. |
 | `OMP_NUM_THREADS` | not set | no | Read by PyTorch's OpenMP runtime when it is imported. The image leaves it unset on purpose; the CronJob sets it to match `ENHANCER_THREADS`. |
 
@@ -162,7 +172,7 @@ The calls, and the permission each one needs:
 | --- | --- |
 | `GET /api/server/ping`, `GET /api/server/version` | none |
 | `GET /api/api-keys/me` | none: any key may read its own |
-| `PUT /api/tags` (create the five tags) | `tag.create` |
+| `PUT /api/tags` (create the six tags) | `tag.create` |
 | `POST /api/search/metadata` (the queue; by checksum after a duplicate upload) | `asset.read` |
 | `GET /api/assets/{id}` | `asset.read` |
 | `GET /api/assets/{id}/original` | `asset.download` |
@@ -184,10 +194,10 @@ Outbound, at runtime:
 | cluster DNS | UDP/TCP 53 | To resolve the name above |
 
 Nothing else, and **no internet access at all.** Every weight the pipeline loads is baked
-into the image. facexlib downloads a missing weight on demand, but here that path is never
-reached. The image build proves it: its last step loads all five weights with the network
-switched off (`scripts/selfcheck.py`). There is no telemetry, no update check and no font or
-CDN fetch.
+into the image, and nothing in the job downloads one: a missing weight is an error that
+names the file. The image build proves it: its last step runs both upscalers through the
+job's own pipeline with the network switched off (`scripts/selfcheck.py`). There is no
+telemetry, no update check and no font or CDN fetch.
 
 Build time only (CI and `docker build`, never the pod): GitHub release assets (weights),
 `download.pytorch.org` (CPU wheels), PyPI, `deb.debian.org`, and `ghcr.io`.
@@ -202,25 +212,14 @@ sha256. The Dockerfile runs it in a builder stage and copies the result to `/opt
 | --- | --- | --- | --- | --- |
 | `RealESRGAN_x4plus.pth` | 67.0 MB | `4fa0d389…f9d682f1` | [xinntao/Real-ESRGAN v0.1.0](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.1.0) | BSD-3-Clause |
 | `realesr-general-x4v3.pth` | 4.9 MB | `8dc7edb9…ece96292` | [xinntao/Real-ESRGAN v0.2.5.0](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0) | BSD-3-Clause |
-| `GFPGANv1.4.pth` | 348.6 MB | `e2cd4703…1b6be5ad` | [TencentARC/GFPGAN v1.3.0](https://github.com/TencentARC/GFPGAN/releases/tag/v1.3.0) | Apache-2.0, see note |
-| `facexlib/detection_Resnet50_Final.pth` | 109.5 MB | `6d1de9c2…b0a5a16d` | [xinntao/facexlib v0.1.0](https://github.com/xinntao/facexlib/releases/tag/v0.1.0) | MIT (RetinaFace, from [biubug6/Pytorch_Retinaface](https://github.com/biubug6/Pytorch_Retinaface), MIT) |
-| `facexlib/parsing_parsenet.pth` | 85.3 MB | `3d558d8d…72920de2` | [xinntao/facexlib v0.2.2](https://github.com/xinntao/facexlib/releases/tag/v0.2.2) | **Non-commercial**, see note |
 
 ¹ The full hashes are in `scripts/fetch-weights.sh`. They were recorded on 2026-10-23 and
 cross-checked against independent Hugging Face mirrors of the same files.
 
-Licence notes:
-
-- **GFPGAN.** Its LICENSE grants Apache-2.0 "except for the third-party components listed
-  below". Those include StyleGAN2-derived code under NVIDIA's licence and DFDNet-derived code
-  under CC BY-NC-SA 4.0. v1.4 is the "clean" architecture, which needs none of StyleGAN2's
-  custom CUDA operations.
-- **ParseNet.** facexlib is MIT, but its `parsenet.py` says it is "modified from
-  [chaofengc/PSFRGAN](https://github.com/chaofengc/PSFRGAN)". PSFR-GAN is licensed CC BY-NC-SA
-  4.0, so treat these weights as **non-commercial**. They cannot be dropped:
-  facexlib's `FaceRestoreHelper` loads the parsing model even when parsing is off.
-- **Loaders.** The code that loads the models is MIT: [spandrel](https://github.com/chaiNNer-org/spandrel)
-  and facexlib. The `basicsr`, `realesrgan` and `gfpgan` packages are not used.
+Both weights are from [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)'s own releases,
+under its BSD-3-Clause licence. The code that loads them is MIT:
+[spandrel](https://github.com/chaiNNer-org/spandrel). The `basicsr` and `realesrgan`
+packages are not used.
 
 ## The image
 
@@ -264,7 +263,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12.
 
 ```sh
 uv sync                                        # pinned deps from uv.lock, CPU-only torch
-scripts/fetch-weights.sh models                # about 615 MB, sha256-verified; models/ is gitignored
+scripts/fetch-weights.sh models                # about 72 MB, sha256-verified; models/ is gitignored
 uv run ruff check . && uv run ruff format --check .
 ENHANCER_MODEL_DIR="$PWD/models" uv run pytest
 docker build -t immich-enhancer .              # the last build step loads every weight offline
@@ -279,5 +278,5 @@ the setting like the job does, and its default is `/opt/models`.
 
 ## Licence
 
-The code in this repository is [MIT](LICENSE). The model weights carry their own licences,
+The code in this repository is [MIT](LICENSE). The two model weights are BSD-3-Clause, as
 listed above.
