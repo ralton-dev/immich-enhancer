@@ -11,62 +11,165 @@ no port.
 
 ## How it works
 
-1. Find assets tagged `enhance`, through Immich's public API.
-2. Skip what it should not touch: anything but JPEG and PNG (in v1), videos, assets already
-   in a stack, and assets already tagged `enhanced` or `enhanced-source`.
-3. Download the original, rotate it upright using its EXIF orientation, and upscale it:
-   - ×4 up to 1 MP, ×2 up to 4 MP, ×1 (faces only) above that;
-   - output is capped at `ENHANCER_MAX_OUTPUT_MP`;
-   - inference is tiled, so memory stays bounded.
-4. Restore faces: [facexlib](https://github.com/xinntao/facexlib) finds and aligns them
-   (RetinaFace, ParseNet), and GFPGAN v1.4 restores each one.
-5. Write a JPEG that carries the original's EXIF with `Orientation` reset to 1. Upload it with
-   the original's `fileCreatedAt` and `fileModifiedAt`, so it lands at the same place in the
-   timeline.
-6. Stack the new asset on the original as primary, and add it to every album the original is
-   in.
-7. Move the tags: the original goes from `enhance` to `enhanced-source`, and the new asset
-   gets `enhanced`. A failure is tagged `enhance-failed`; an unsupported input is tagged
-   `enhance-skipped` and the reason is logged.
+One run, in order (`immich_enhancer/run.py`):
 
-Every run ends with one JSON summary line (`processed, succeeded, failed, skipped, seconds`).
-The exit code is 0 when the queue was empty or at least one asset succeeded. It is non-zero
-only when every attempted asset failed, or a systemic step did (auth, ping, tag upsert).
+1. Read the settings, then check Immich. Ping it, up to 6 tries 5 s apart, so a pod that
+   starts before its network policy is in place still gets through. Log the server
+   version, with a warning if it is not v3. Read the API key's permissions
+   (`GET /api/api-keys/me`); a key that lacks one stops the run before any write and names
+   what is missing (see [The API key](#the-api-key)).
+2. Create any of the five tags that do not exist yet. Read the whole `enhance` queue, every
+   page, before touching any of it.
+3. For each queued asset, skip what the job should not touch:
+   - an asset already tagged `enhanced` or `enhanced-source`: it is the job's own work, so
+     the stray `enhance` tag is removed and nothing else changes;
+   - a video, or any file type except JPEG and PNG (in v1);
+   - an asset that is already in a stack;
+   - a photo edited inside Immich: the download is the unedited original, so an enhanced
+     copy on top would undo the edit;
+   - a file whose bytes turn out not to be JPEG or PNG, such as a WebP named `.jpg`. An MPO
+     (a JPEG with extra frames) is not skipped: its first frame is enhanced;
+   - a photo the job could only re-encode. It gets no upscaling (over 4 MP, or held back by
+     `ENHANCER_MAX_OUTPUT_MP`) and no face is restored in it, because none was found or the
+     face pass is off. A plain re-encode stacked in front of the original would only put a
+     slightly worse copy on top. The log says "nothing to enhance: larger than 4 MP and no
+     face found".
+
+   The last two are known only after the pipeline has run. Apart from the first case, a
+   skipped asset moves from `enhance` to `enhance-skipped` and the reason is logged.
+4. Download the original, turn it upright from its EXIF orientation, and upscale it:
+   - ×4 up to 1 MP, ×2 up to 4 MP, ×1 (faces only) above that;
+   - a scale whose output would exceed `ENHANCER_MAX_OUTPUT_MP` steps down. ×1 may exceed
+     it, because the output is never smaller than the original;
+   - inference runs in tiles, so memory depends on the tile size, not the photo.
+5. Restore faces. [facexlib](https://github.com/xinntao/facexlib)'s RetinaFace finds and
+   aligns them, GFPGAN v1.4 restores each one, and ParseNet's face mask blends it back in.
+   In a photo over 2 MP, faces are found on a 2 MP copy.
+6. Write a JPEG that carries the original's EXIF (dates and GPS included) with `Orientation`
+   reset to 1 and the embedded thumbnail dropped. A transparent PNG is composited on white,
+   a greyscale photo stays greyscale, and the colour profile is kept unless it is CMYK.
+7. Upload it as `<name>-enhanced.jpg`, with the original's `fileCreatedAt`,
+   `fileModifiedAt` and favourite flag, so it lands at the same place in the timeline.
+   If Immich already holds those exact bytes, because an earlier run died after its upload,
+   the job finishes that asset rather than failing.
+8. Stack the new asset on the original as primary, and add it to every album the original
+   is in. An album the job may not add to, such as a shared album Ben can only view, gets a
+   warning, not a failure.
+9. Move the tags. The original goes from `enhance` to `enhanced-source`, and loses any
+   `enhance-failed` or `enhance-skipped` left over from an earlier try. The new asset gets
+   `enhanced`.
+10. Check the timeline. Wait up to 20 s for Immich to read the new file's metadata, then
+    compare its `localDateTime` and `fileCreatedAt` with the original's. A difference is
+    logged as a WARNING; it never fails the asset.
+
+An asset whose enhancement fails moves from `enhance` to `enhance-failed`, and the run
+carries on with the next one. The loop stops early once `ENHANCER_MAX_PER_RUN` assets have
+been attempted (successes and failures; skips do not count) or once `ENHANCER_TIME_BUDGET_S`
+has passed. Whatever is left stays queued for the next run.
+
+## Logs and the exit code
+
+Logs go to stdout, where Loki collects them. Each enhanced photo logs one line from the
+pipeline:
+
+```
+enhanced scale=4 faces=1 in=120x160 out=480x640 seconds=… load_seconds=… peak_rss_mib=… sr_model=RealESRGAN_x4plus
+```
+
+`load_seconds` is the share of `seconds` spent loading models. Models load on first use and
+stay loaded for the rest of the run, so the run's first photo pays most of it.
+
+Every run ends with one JSON summary line, including a run that stops at its settings:
+
+```json
+{"event": "summary", "app_version": "sha-…", "processed": 3, "succeeded": 2, "failed": 0, "skipped": 1, "queued": 3, "seconds": 41.2, "dry_run": false, "stopped": null, "exit_code": 0}
+```
+
+- `processed` is `succeeded + failed + skipped`.
+- `queued` is how many assets carried `enhance` when the run started.
+- `stopped` is `"max_per_run"`, `"time_budget"` or `null`.
+- `error` is added when the run stopped on one.
+
+The exit code is **1** in two cases:
+
+- a systemic error: configuration, ping, the API key, the tag upsert, reading the queue, a
+  pipeline that cannot be imported, or an unexpected bug;
+- assets were attempted and none succeeded.
+
+Every other run exits **0**: an empty queue, a run of nothing but skips, and a run in which
+one photo failed but another succeeded. A failed photo fails the Job only when nothing else
+in the run succeeded.
 
 ## Configuration
 
-Configuration comes from environment variables only. A missing required variable stops the
-job at startup with an error naming it. Booleans are on only for the exact string `true`.
+Configuration comes from environment variables only (`immich_enhancer/config.py`). The run
+checks all of them before it contacts Immich. If any is missing or invalid, it stops with one
+error that names every bad variable. Text values are trimmed, and a text or number setting
+that is set but empty is an error. Booleans are on only for the exact string `true`.
 
 | Variable | Default | Secret | Meaning |
 | --- | --- | --- | --- |
-| `IMMICH_URL` | `http://immich-server.immich.svc.cluster.local:2283` | no | Immich base URL. Requests go to `$IMMICH_URL/api/…`. |
-| `IMMICH_API_KEY` | required | **yes** | Immich API key, sent as `x-api-key`. Keys are per user, so the job sees only that user's assets. It needs: asset read, view, download, upload; stack create, read; tag create, read, asset; album read and asset-add. |
-| `APP_VERSION` | required | no | The image tag this pod runs (`sha-<full commit sha>`), set by the CronJob. It appears in the summary line. |
+| `IMMICH_URL` | `http://immich-server.immich.svc.cluster.local:2283` | no | Immich base URL; a trailing `/` is dropped. Requests go to `$IMMICH_URL/api/…`. |
+| `IMMICH_API_KEY` | required | **yes** | Immich API key, sent as `x-api-key`. Keys are per user, so the job sees only that user's assets. Permissions: see [The API key](#the-api-key). |
+| `APP_VERSION` | required | no | The image tag this pod runs (`sha-<full commit sha>`), set by the CronJob. It appears in the log and the summary line. |
 | `ENHANCER_QUEUE_TAG` | `enhance` | no | Tag that queues a photo. |
 | `ENHANCER_DONE_TAG` | `enhanced` | no | Tag on each new, enhanced asset. |
 | `ENHANCER_SOURCE_TAG` | `enhanced-source` | no | Tag the original carries once its enhanced copy exists. |
 | `ENHANCER_FAILED_TAG` | `enhance-failed` | no | Tag for a photo whose enhancement failed. |
-| `ENHANCER_SKIPPED_TAG` | `enhance-skipped` | no | Tag for an input the job does not handle. |
-| `ENHANCER_MAX_PER_RUN` | `10` | no | Most assets attempted in one run. |
-| `ENHANCER_TIME_BUDGET_S` | `2700` | no | No new asset is started after this many seconds. |
-| `ENHANCER_MAX_OUTPUT_MP` | `16` | no | Cap on output size, in megapixels. |
-| `ENHANCER_SR_MODEL` | `RealESRGAN_x4plus` | no | Upscaler: `RealESRGAN_x4plus` (quality) or `realesr-general-x4v3` (compact, about 10× faster). Both are in the image. |
-| `ENHANCER_FACE_RESTORE` | `true` | no | Run the face pass. |
-| `ENHANCER_TILE` | `256` | no | Tile size for upscaling. |
-| `ENHANCER_THREADS` | `4` | no | CPU threads for inference (`torch.set_num_threads`). |
+| `ENHANCER_SKIPPED_TAG` | `enhance-skipped` | no | Tag for a photo the job skipped (see [How it works](#how-it-works)); the reason is in the log. |
+| `ENHANCER_MAX_PER_RUN` | `10` | no | Most assets attempted in one run (successes plus failures; skips do not count). At least 1. |
+| `ENHANCER_TIME_BUDGET_S` | `2700` | no | No new asset is started this many seconds after the run began. At least 1. |
+| `ENHANCER_MAX_OUTPUT_MP` | `16` | no | Cap on upscaled output, in megapixels. A scale that would exceed it steps down; ×1 output may exceed it. At least 1. |
+| `ENHANCER_SR_MODEL` | `RealESRGAN_x4plus` | no | Upscaler: `RealESRGAN_x4plus` (quality) or `realesr-general-x4v3` (compact, about 10× faster). Both are in the image. Any other value is a configuration error. |
+| `ENHANCER_FACE_RESTORE` | `true` | no | Run the face pass. Any value other than `true` turns it off. |
+| `ENHANCER_TILE` | `256` | no | Tile size for upscaling, in input pixels. Each tile also takes 16 px of context from its neighbours. At least 64. |
+| `ENHANCER_THREADS` | `4` | no | CPU threads for PyTorch and OpenCV (`torch.set_num_threads`, `cv2.setNumThreads`). At least 1. |
 | `ENHANCER_MODEL_DIR` | `/opt/models` | no | Where the weights are. facexlib's two are in its `facexlib/` subdirectory. |
-| `ENHANCER_WORK_DIR` | `/tmp/enhancer` | no | Scratch space for downloads and outputs. It must be writable. |
-| `ENHANCER_JPEG_QUALITY` | `92` | no | Quality of the enhanced JPEG. |
-| `ENHANCER_DRY_RUN` | `false` | no | `true` does everything except upload, stack and tag. |
-| `ENHANCER_LOG_LEVEL` | `INFO` | no | Python log level. |
+| `ENHANCER_WORK_DIR` | `/tmp/enhancer` | no | Scratch space for downloads and outputs. It is created if missing and must be writable; each asset's files are deleted when it is done. |
+| `ENHANCER_JPEG_QUALITY` | `92` | no | Quality of the enhanced JPEG, 1 to 100. |
+| `ENHANCER_DRY_RUN` | `false` | no | `true` creates any of the five tags that are missing (`PUT /tags`), then downloads and enhances each queued photo. It uploads nothing, creates no stack, adds nothing to an album and changes no asset's tags. A photo it would have uploaded counts as succeeded. |
+| `ENHANCER_LOG_LEVEL` | `INFO` | no | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case. At `DEBUG`, every HTTP request is logged too. |
 | `OMP_NUM_THREADS` | not set | no | Read by PyTorch's OpenMP runtime when it is imported. The image leaves it unset on purpose; the CronJob sets it to match `ENHANCER_THREADS`. |
 
 `IMMICH_URL`, `IMMICH_API_KEY` and `APP_VERSION` are named outright. Every other setting is
-`ENHANCER_` plus its field name in `immich_enhancer/config.py`.
+`ENHANCER_` plus its field name in `immich_enhancer/config.py`. An `ENHANCER_` variable the
+job does not know is logged as a warning and ignored, so a typo in the ConfigMap is visible
+rather than silently keeping the default.
 
-The job writes only under `/tmp`: it sets `HOME=/tmp` and uses `ENHANCER_WORK_DIR`. That
-means it runs with a read-only root filesystem and a writable `emptyDir` at `/tmp`.
+The job writes only to `ENHANCER_WORK_DIR`, and the image sets `HOME=/tmp`. So it runs with
+a read-only root filesystem and a writable `emptyDir` at `/tmp`.
+
+### The API key
+
+Create the key in Immich (Account Settings → API Keys) with: **asset read, view, download,
+upload; stack create, read; tag create, read, asset; album read and asset-add**. The run's
+error messages quote this same list, `KEY_PERMISSIONS` in `immich_enhancer/immich.py`.
+
+Before its first write, the run reads the key's permissions with `GET /api/api-keys/me` and
+stops, naming each one that is missing. It requires `asset.read`, `asset.download`,
+`asset.upload`, `stack.create`, `album.read`, `albumAsset.create`, `tag.create` and
+`tag.asset`. A dry run requires only `asset.read`, `asset.download` and `tag.create`. A key
+with `all` passes.
+
+If Immich does not answer that endpoint, the run logs a warning and carries on. A missing
+permission then fails its own call with a 403, and the run stops there with an error naming
+the permission.
+
+The calls, and the permission each one needs:
+
+| Call | Permission |
+| --- | --- |
+| `GET /api/server/ping`, `GET /api/server/version` | none |
+| `GET /api/api-keys/me` | none: any key may read its own |
+| `PUT /api/tags` (create the five tags) | `tag.create` |
+| `POST /api/search/metadata` (the queue; by checksum after a duplicate upload) | `asset.read` |
+| `GET /api/assets/{id}` | `asset.read` |
+| `GET /api/assets/{id}/original` | `asset.download` |
+| `POST /api/assets` (upload) | `asset.upload` |
+| `POST /api/stacks` | `stack.create` |
+| `GET /api/albums?assetId=` | `album.read` |
+| `PUT /api/albums/{id}/assets` | `albumAsset.create` |
+| `PUT` and `DELETE /api/tags/{id}/assets` | `tag.asset` |
 
 ## Network
 
@@ -167,8 +270,11 @@ docker build -t immich-enhancer .              # the last build step loads every
 ```
 
 `tests/test_contract.py` is the end-to-end contract. It runs a fake Immich, seeds it with
-one tagged photo, runs the job, and checks what the job left behind. It is marked
-`xfail(strict=True)` until the run loop exists.
+one tagged photo, runs the job with the real pipeline, and checks what the job left behind.
+It and `tests/test_pipeline.py` load the real models, so fetch the weights first.
+
+`ENHANCER_MODEL_DIR` must point at them, as in the command above. The contract test reads
+the setting like the job does, and its default is `/opt/models`.
 
 ## Licence
 
