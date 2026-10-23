@@ -352,8 +352,8 @@ def test_tagged_asset_becomes_stacked_enhanced_sibling(httpserver, monkeypatch, 
     monkeypatch.setenv("APP_VERSION", "contract-test")
     monkeypatch.setenv("ENHANCER_WORK_DIR", str(tmp_path / "work"))
 
-    # Imported here, not at module top: until WP-B lands, this import is the
-    # red, and it must fail the test rather than the collection.
+    # Imported here, not at module top, so a module that fails to import fails
+    # this test rather than the whole collection.
     from immich_enhancer.run import main
 
     exit_code = main()
