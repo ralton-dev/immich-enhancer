@@ -183,11 +183,12 @@ print(json.dumps({
 
 # Peak RSS of one fresh process enhancing the fixture at x4 with the default
 # RealESRGAN_x4plus: the imports, its one weight, and the call that writes both
-# copies. Measured 2026-10-23, after the face pass was removed: 1.67 GiB on
-# macOS (M5 Pro), 3.20 GiB before. PyTorch's macOS wheels are built without
-# oneDNN, so there every convolution is im2col + GEMM, which allocates about
-# 0.6 GB for one 64-channel 3x3 convolution at 512x512. The plan's bound is for
-# Linux, where CI and the cluster run.
+# copies. Measured 2026-10-23, after the face pass was removed: 0.99 GiB on
+# Linux (arm64 in Docker, 4 CPUs, the image's own torch), 1.85 GiB before;
+# 1.67 GiB on macOS (M5 Pro), 3.20 GiB before. PyTorch's macOS wheels are built
+# without oneDNN, so there every convolution is im2col + GEMM, which allocates
+# about 0.6 GB for one 64-channel 3x3 convolution at 512x512. The plan's bound
+# is for Linux, where CI and the cluster run.
 RSS_LIMIT = {"linux": 2.5 * GIB, "darwin": 4 * GIB}
 
 
