@@ -1,0 +1,11 @@
+# Allowlist: the image needs the lock, the two build scripts and the package.
+# Anything else stays out of the build context, including a local models/
+# directory (~600 MB) and .venv.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!scripts/fetch-weights.sh
+!scripts/selfcheck.py
+!immich_enhancer/
+**/__pycache__
