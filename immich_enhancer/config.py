@@ -58,6 +58,7 @@ class Settings:
     immich_api_key: str = field(repr=False)  # required, secret: never logged
     queue_tag: str = "enhance"
     done_tag: str = "enhanced"
+    pixel_tag: str = "pixel-x4"
     source_tag: str = "enhanced-source"
     failed_tag: str = "enhance-failed"
     skipped_tag: str = "enhance-skipped"
@@ -65,7 +66,6 @@ class Settings:
     time_budget_s: int = 2700
     max_output_mp: int = 16
     sr_model: str = "RealESRGAN_x4plus"
-    face_restore: bool = True
     tile: int = 256
     threads: int = 4
     model_dir: str = "/opt/models"

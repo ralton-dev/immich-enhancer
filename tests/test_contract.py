@@ -1,18 +1,21 @@
-"""The red pin: one tagged photo in, one stacked and enhanced sibling out.
+"""The red pin: one tagged photo in, two stacked siblings out.
 
 A fake Immich (pytest-httpserver) holds one `enhance`-tagged 160x120 JPEG that
 carries `DateTimeOriginal 2004:06:12 14:03:00` and `Orientation 6`, in one album.
 After `run.main()`:
 
-- the fake holds two assets, and the original's bytes were never PUT, PATCHed
+- the fake holds three assets, and the original's bytes were never PUT, PATCHed
   or DELETEd;
-- the new asset is a JPEG, 480x640 (rotated upright, x4), `Orientation 1`, with
-  the same `DateTimeOriginal`, uploaded with the original's `fileCreatedAt` and
-  `fileModifiedAt`;
-- exactly one stack exists, with `assetIds == [new, original]`;
-- the original carries `enhanced-source` and not `enhance`; the new asset
-  carries `enhanced`;
-- the new asset was added to the original's one album.
+- the enhanced asset is a JPEG, 480x640 (rotated upright, x4), `Orientation 1`,
+  with the same `DateTimeOriginal`, uploaded with the original's `fileCreatedAt`
+  and `fileModifiedAt`;
+- the pixel asset is a JPEG, 480x640, within a mean of 2 levels of a
+  nearest-neighbour x4 of the upright original, with the same EXIF and
+  timestamps;
+- exactly one stack exists, with `assetIds == [enhanced, pixel, original]`;
+- the original carries `enhanced-source` and not `enhance`; the enhanced asset
+  carries `enhanced` and the pixel asset `pixel-x4`;
+- both new assets were added to the original's one album.
 
 The test runs the real pipeline, so the weights must be in
 `ENHANCER_MODEL_DIR` (CI fetches them; locally see the README).
@@ -30,8 +33,9 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import piexif
-from PIL import Image
+from PIL import Image, ImageOps
 from werkzeug import Request, Response
 
 FIXTURE = Path(__file__).parent / "fixtures" / "face-160x120.jpg"
@@ -328,6 +332,19 @@ class FakeImmich:
         return self._json(200, results)
 
 
+def decoded(data: bytes) -> np.ndarray:
+    with Image.open(io.BytesIO(data)) as image:
+        return np.asarray(image.convert("RGB"), dtype=np.float32)
+
+
+def nearest_x4_upright(data: bytes) -> np.ndarray:
+    """The original turned upright, every pixel a 4x4 block, as decoded pixels."""
+    with Image.open(io.BytesIO(data)) as image:
+        upright = ImageOps.exif_transpose(image).convert("RGB")
+    big = upright.resize((upright.width * 4, upright.height * 4), Image.Resampling.NEAREST)
+    return np.asarray(big, dtype=np.float32)
+
+
 def test_tagged_asset_becomes_stacked_enhanced_sibling(httpserver, monkeypatch, tmp_path):
     original_bytes = tagged_fixture()
     fake = FakeImmich(api_key=API_KEY)
@@ -360,9 +377,13 @@ def test_tagged_asset_becomes_stacked_enhanced_sibling(httpserver, monkeypatch, 
     httpserver.check_handler_errors()
     assert exit_code == 0, fake.summary()
 
-    # Two assets; the original was never written to.
-    assert len(fake.assets) == 2, fake.summary()
-    (new,) = [asset_id for asset_id in fake.assets if asset_id != original]
+    # Three assets; the original was never written to. The copies are told
+    # apart by the names they were uploaded under (plan decision 23).
+    assert len(fake.assets) == 3, fake.summary()
+    by_name = {fake.assets[a]["originalFileName"]: a for a in fake.assets if a != original}
+    assert set(by_name) == {"face-160x120-enhanced.jpg", "face-160x120-x4.jpg"}, fake.summary()
+    enhanced = by_name["face-160x120-enhanced.jpg"]
+    pixel = by_name["face-160x120-x4.jpg"]
     writes = [
         e
         for e in fake.log
@@ -374,32 +395,39 @@ def test_tagged_asset_becomes_stacked_enhanced_sibling(httpserver, monkeypatch, 
     assert fake.files[original] == original_bytes
     assert fake.assets[original]["checksum"] == immich_checksum(original_bytes)
 
-    # The new asset: JPEG, upright and x4, Orientation 1, same capture time.
-    data = fake.files[new]
-    with Image.open(io.BytesIO(data)) as image:
-        assert image.format == "JPEG"
-        assert image.size == (480, 640)
-    exif = piexif.load(data)
-    assert exif["0th"].get(piexif.ImageIFD.Orientation) == 1
-    assert exif["Exif"].get(piexif.ExifIFD.DateTimeOriginal) == DATE_TIME_ORIGINAL
+    # Both copies: JPEG, upright and x4, Orientation 1, same capture time.
+    for new in (enhanced, pixel):
+        data = fake.files[new]
+        with Image.open(io.BytesIO(data)) as image:
+            assert image.format == "JPEG"
+            assert image.size == (480, 640)
+        exif = piexif.load(data)
+        assert exif["0th"].get(piexif.ImageIFD.Orientation) == 1
+        assert exif["Exif"].get(piexif.ExifIFD.DateTimeOriginal) == DATE_TIME_ORIGINAL
 
-    # Uploaded with the original's timestamps, verbatim.
-    new_checksum = fake.assets[new]["checksum"]
-    uploads = [u for u in fake.uploads if immich_checksum(u["data"]) == new_checksum]
-    assert uploads, fake.summary()
-    for upload in uploads:
-        assert upload["form"]["fileCreatedAt"] == FILE_CREATED_AT
-        assert upload["form"]["fileModifiedAt"] == FILE_MODIFIED_AT
+    # The pixel copy is the upright original with every pixel a 4x4 block,
+    # compared after decoding because JPEG is lossy (measured 0.9 levels). The
+    # model's upscale is not (measured 6.8 levels from it).
+    nearest = nearest_x4_upright(original_bytes)
+    assert np.abs(decoded(fake.files[pixel]) - nearest).mean() < 2
+    assert np.abs(decoded(fake.files[enhanced]) - nearest).mean() > 4
 
-    # One stack, the enhanced asset first (primary).
-    assert [s["assetIds"] for s in fake.stacks] == [[new, original]]
+    # Each uploaded with the original's timestamps, verbatim.
+    for new in (enhanced, pixel):
+        checksum = fake.assets[new]["checksum"]
+        uploads = [u for u in fake.uploads if immich_checksum(u["data"]) == checksum]
+        assert uploads, fake.summary()
+        for upload in uploads:
+            assert upload["form"]["fileCreatedAt"] == FILE_CREATED_AT
+            assert upload["form"]["fileModifiedAt"] == FILE_MODIFIED_AT
 
-    # Tags moved: the original is the source now, the new asset is the result.
-    assert "enhanced-source" in fake.tag_names(original)
-    assert "enhance" not in fake.tag_names(original)
-    assert "enhanced" in fake.tag_names(new)
-    assert "enhance" not in fake.tag_names(new)
+    # One stack: the enhanced asset first (primary), then the pixel copy.
+    assert [s["assetIds"] for s in fake.stacks] == [[enhanced, pixel, original]]
 
-    # The new asset joined the original's one album.
-    assert new in fake.albums[album]["assetIds"]
-    assert original in fake.albums[album]["assetIds"]
+    # Tags moved: the original is the source now; each copy says what it is.
+    assert fake.tag_names(original) == {"enhanced-source"}
+    assert fake.tag_names(enhanced) == {"enhanced"}
+    assert fake.tag_names(pixel) == {"pixel-x4"}
+
+    # Both copies joined the original's one album.
+    assert set(fake.albums[album]["assetIds"]) == {original, enhanced, pixel}

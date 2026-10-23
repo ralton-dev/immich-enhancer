@@ -4,7 +4,8 @@ The fake is the contract test's FakeImmich (the plan's call table, OpenAPI
 v3.3.5 shapes), extended with what these tests set up: ping and version public
 as they are in Immich, the key's own permissions, extra detail fields per asset
 (a video, an edited photo, a pending metadata read), assets in the trash, and
-refused calls. The stub writes recognisable bytes and never imports torch.
+refused calls. The stub writes two recognisable files, one per copy, and never
+imports torch.
 """
 
 from __future__ import annotations
@@ -105,6 +106,10 @@ def enhanced(data: bytes) -> bytes:
     return b"ENHANCED:" + data
 
 
+def pixelated(data: bytes) -> bytes:
+    return b"PIXEL:" + data
+
+
 @dataclass
 class Stub:
     """Stands in for pipeline.enhance_file. Fails for inputs listed in `fail`."""
@@ -113,8 +118,11 @@ class Stub:
     on_call: Callable[[], None] | None = None
     calls: list[bytes] = field(default_factory=list)
     settings: Settings | None = None
+    scale: int = 4
 
-    def __call__(self, src: Path, dst: Path, settings: Settings) -> SimpleNamespace:
+    def __call__(
+        self, src: Path, dst_enhanced: Path, dst_pixel: Path, settings: Settings
+    ) -> SimpleNamespace:
         data = src.read_bytes()
         self.calls.append(data)
         self.settings = settings
@@ -122,10 +130,17 @@ class Stub:
             self.on_call()
         if data in self.fail:
             raise RuntimeError("stub: this one cannot be enhanced")
-        dst.write_bytes(enhanced(data))
-        return SimpleNamespace(
-            scale=4, faces=1, in_size=(160, 120), out_size=(640, 480), seconds=0.01
-        )
+        dst_enhanced.write_bytes(enhanced(data))
+        dst_pixel.write_bytes(pixelated(data))
+        size = (160 * self.scale, 120 * self.scale)
+        return SimpleNamespace(scale=self.scale, in_size=(160, 120), out_size=size, seconds=0.01)
+
+
+def copies(fake: RunFake, original: str) -> tuple[str, str]:
+    """The (enhanced, pixel) assets a run made of `original`, told apart by content."""
+    data = fake.files[original]
+    by_content = {fake.files[a]: a for a in fake.assets if a != original}
+    return by_content[enhanced(data)], by_content[pixelated(data)]
 
 
 def queue_photo(
@@ -163,7 +178,7 @@ def summary_of(capsys) -> dict:
 
 def changes(fake: RunFake) -> list[str]:
     """Requests that change an asset, album, stack or tag membership. The tag
-    upsert (PUT /tags) only names the five tags; search is a read sent as POST."""
+    upsert (PUT /tags) only names the six tags; search is a read sent as POST."""
     reads = {"PUT /api/tags", "POST /api/search/metadata"}
     return [c for c in fake.calls() if not c.startswith("GET ") and c not in reads]
 
@@ -206,9 +221,13 @@ def test_an_empty_queue_exits_0_with_one_summary_line(fake, capsys):
         "PUT /api/tags",
         "POST /api/search/metadata",
     ]
+    (upsert,) = [e for e in fake.log if e["path"] == "/api/tags"]
+    assert sorted(upsert["json"]["tags"]) == sorted(
+        ["enhance", "enhanced", "pixel-x4", "enhanced-source", "enhance-failed", "enhance-skipped"]
+    )
 
 
-def test_a_queued_photo_is_enhanced_stacked_and_retagged(fake, capsys, tmp_path):
+def test_a_queued_photo_gets_both_copies_stacked_and_retagged(fake, capsys, tmp_path):
     original = queue_photo(fake, b"\xff\xd8photo", name="IMG_0001.JPG", favorite=True)
     album = fake.add_album("Summer 2004", [original])
     elsewhere = fake.add_album("Elsewhere", [])
@@ -216,20 +235,25 @@ def test_a_queued_photo_is_enhanced_stacked_and_retagged(fake, capsys, tmp_path)
 
     assert run.main(enhance=stub) == 0
 
-    (new,) = [asset_id for asset_id in fake.assets if asset_id != original]
-    assert fake.files[new] == enhanced(b"\xff\xd8photo")
-    (upload,) = fake.uploads
-    assert upload["filename"] == "IMG_0001-enhanced.jpg"
-    assert upload["form"] == {
-        "filename": "IMG_0001-enhanced.jpg",
-        "fileCreatedAt": FILE_CREATED_AT,
-        "fileModifiedAt": FILE_MODIFIED_AT,
-        "isFavorite": "true",
-    }
-    assert [s["assetIds"] for s in fake.stacks] == [[new, original]]
+    assert len(fake.assets) == 3
+    new, pixel = copies(fake, original)
+    by_name = {upload["filename"]: upload for upload in fake.uploads}
+    assert set(by_name) == {"IMG_0001-enhanced.jpg", "IMG_0001-x4.jpg"}
+    for name, upload in by_name.items():
+        assert upload["form"] == {
+            "filename": name,
+            "fileCreatedAt": FILE_CREATED_AT,
+            "fileModifiedAt": FILE_MODIFIED_AT,
+            "isFavorite": "true",
+        }
+    assert by_name["IMG_0001-enhanced.jpg"]["data"] == enhanced(b"\xff\xd8photo")
+    assert by_name["IMG_0001-x4.jpg"]["data"] == pixelated(b"\xff\xd8photo")
+    # The enhanced copy on top, the pixel copy next, the original underneath.
+    assert [s["assetIds"] for s in fake.stacks] == [[new, pixel, original]]
     assert fake.tag_names(original) == {"enhanced-source"}
     assert fake.tag_names(new) == {"enhanced"}
-    assert fake.albums[album]["assetIds"] == [original, new]
+    assert fake.tag_names(pixel) == {"pixel-x4"}
+    assert fake.albums[album]["assetIds"] == [original, new, pixel]
     assert fake.albums[elsewhere]["assetIds"] == []
     # The original was read, never written.
     assert fake.files[original] == b"\xff\xd8photo"
@@ -243,6 +267,23 @@ def test_a_queued_photo_is_enhanced_stacked_and_retagged(fake, capsys, tmp_path)
     assert list((tmp_path / "work").iterdir()) == []
     summary = summary_of(capsys)
     assert (summary["processed"], summary["succeeded"], summary["exit_code"]) == (1, 1, 0)
+
+
+def test_the_pixel_copy_is_named_for_its_scale(fake, capsys):
+    # A photo between 1 and 4 MP is enlarged x2, and its pixel copy says so.
+    queue_photo(fake, b"photo", name="scan.png", mime="image/png")
+    assert run.main(enhance=Stub(scale=2)) == 0
+    assert sorted(u["filename"] for u in fake.uploads) == ["scan-enhanced.jpg", "scan-x2.jpg"]
+
+
+def test_the_pixel_tag_is_configurable(fake, capsys, monkeypatch):
+    monkeypatch.setenv("ENHANCER_PIXEL_TAG", "blocky")
+    original = queue_photo(fake, b"photo")
+    assert run.main(enhance=Stub()) == 0
+    new, pixel = copies(fake, original)
+    assert fake.tag_names(pixel) == {"blocky"}
+    assert fake.tag_names(new) == {"enhanced"}
+    assert "pixel-x4" not in {tag["value"] for tag in fake.tags.values()}
 
 
 # -- skip rules (decisions 10 and 11) ------------------------------------------
@@ -296,7 +337,7 @@ def test_a_photo_edited_in_immich_is_skipped(fake, capsys):
     assert stub.calls == []
 
 
-@pytest.mark.parametrize("done_tag", ["enhanced-source", "enhanced"])
+@pytest.mark.parametrize("done_tag", ["enhanced-source", "enhanced", "pixel-x4"])
 def test_a_retagged_source_or_result_is_left_alone_and_the_stray_tag_removed(
     fake, capsys, done_tag
 ):
@@ -326,7 +367,7 @@ def test_a_file_the_pipeline_finds_unsupported_is_skipped_not_failed(fake, capsy
     caplog.set_level(logging.INFO)
     webp = queue_photo(fake, b"RIFF....WEBP", name="saved-from-web.jpg")
 
-    def refuse(src: Path, dst: Path, settings: Settings) -> None:
+    def refuse(src: Path, dst_enhanced: Path, dst_pixel: Path, settings: Settings) -> None:
         raise UnsupportedImageError(f"{src.name} is WEBP; only JPEG and PNG are enhanced")
 
     assert run.main(enhance=refuse) == 0
@@ -339,30 +380,25 @@ def test_a_file_the_pipeline_finds_unsupported_is_skipped_not_failed(fake, capsy
     assert (summary["skipped"], summary["failed"], summary["exit_code"]) == (1, 0, 0)
 
 
-# True whatever the cause: over 4 MP, or held back by ENHANCER_MAX_OUTPUT_MP; no
-# face found, or ENHANCER_FACE_RESTORE off.
-NOTHING_TO_ENHANCE = "nothing to enhance: no upscale at this size (x1) and no face restored"
+class NothingToEnhanceError(ValueError):
+    """Stands in for pipeline.NothingToEnhanceError, which run.py matches by name."""
 
 
-def returning(result: object) -> Callable[[Path, Path, Settings], object]:
-    """A pipeline stand-in that writes an output and answers `result`."""
-
-    def enhance(src: Path, dst: Path, settings: Settings) -> object:
-        dst.write_bytes(enhanced(src.read_bytes()))
-        return result
-
-    return enhance
+# The pipeline's message, true whatever held the photo to x1: over 4 MP, or
+# ENHANCER_MAX_OUTPUT_MP.
+NOTHING_TO_ENHANCE = "nothing to enhance: no upscale at this size"
 
 
-def test_a_x1_result_with_no_faces_is_skipped_not_stacked(fake, capsys, caplog):
-    # Over 4 MP the pipeline only restores faces. With none found, its output is
-    # a re-encode of the original, and stacked on top it would hide the better file.
+def too_big(src: Path, dst_enhanced: Path, dst_pixel: Path, settings: Settings) -> None:
+    raise NothingToEnhanceError(f"{NOTHING_TO_ENHANCE} (5000x4000)")
+
+
+def test_a_photo_too_large_to_upscale_is_skipped_not_failed(fake, capsys, caplog):
+    # Over 4 MP there is no upscale (decision 24): a copy would be a re-encode of
+    # the original, so there is nothing to stack.
     caplog.set_level(logging.INFO)
-    big = queue_photo(fake, b"over-4-MP-and-no-face")
-    plain = SimpleNamespace(
-        scale=1, faces=0, in_size=(5000, 4000), out_size=(5000, 4000), seconds=40.0
-    )
-    assert run.main(enhance=returning(plain)) == 0
+    big = queue_photo(fake, b"over-4-MP")
+    assert run.main(enhance=too_big) == 0
     assert fake.tag_names(big) == {"enhance-skipped"}
     assert fake.uploads == []
     assert fake.stacks == []
@@ -372,28 +408,11 @@ def test_a_x1_result_with_no_faces_is_skipped_not_stacked(fake, capsys, caplog):
     assert (summary["failed"], summary["exit_code"]) == (0, 0)
 
 
-@pytest.mark.parametrize(
-    "result",
-    [
-        SimpleNamespace(scale=1, faces=2),  # faces restored: worth having
-        SimpleNamespace(scale=2, faces=0),  # upscaled: worth having
-        object(),  # nothing to judge by: uploaded as usual
-    ],
-    ids=["x1-with-faces", "x2-without-faces", "no-attributes"],
-)
-def test_any_other_result_is_still_stacked(fake, capsys, result):
-    photo = queue_photo(fake, b"photo")
-    assert run.main(enhance=returning(result)) == 0
-    assert fake.tag_names(photo) == {"enhanced-source"}
-    assert len(fake.uploads) == 1
-    assert len(fake.stacks) == 1
-
-
-def test_dry_run_logs_the_nothing_to_enhance_decision(fake, capsys, caplog, monkeypatch):
+def test_dry_run_logs_the_nothing_to_enhance_skip(fake, capsys, caplog, monkeypatch):
     monkeypatch.setenv("ENHANCER_DRY_RUN", "true")
     caplog.set_level(logging.INFO)
-    big = queue_photo(fake, b"over-4-MP-and-no-face")
-    assert run.main(enhance=returning(SimpleNamespace(scale=1, faces=0))) == 0
+    big = queue_photo(fake, b"over-4-MP")
+    assert run.main(enhance=too_big) == 0
     assert any(NOTHING_TO_ENHANCE in r.getMessage() for r in caplog.records), caplog.text
     assert changes(fake) == []
     assert fake.tag_names(big) == {"enhance"}
@@ -511,26 +530,51 @@ def test_a_permission_refused_mid_run_stops_the_run_and_exits_1(fake, capsys):
 # -- duplicates (decision 11) -----------------------------------------------------
 
 
-def test_an_upload_immich_already_has_is_finished_not_failed(fake, capsys):
+@pytest.mark.parametrize(
+    "uploaded_before", [("enhanced",), ("enhanced", "pixel")], ids=["enhanced", "both"]
+)
+def test_uploads_immich_already_has_are_finished_not_failed(fake, capsys, uploaded_before):
     original = queue_photo(fake, b"photo")
     album = fake.add_album("Summer 2004", [original])
-    # An earlier run uploaded these enhanced bytes, then died before stacking.
-    earlier = fake.add_asset(
-        enhanced(b"photo"),
-        filename="photo-enhanced.jpg",
-        file_created_at=FILE_CREATED_AT,
-        file_modified_at=FILE_MODIFIED_AT,
-    )
+    # An earlier run uploaded these copies, then died before stacking.
+    files = {"enhanced": enhanced(b"photo"), "pixel": pixelated(b"photo")}
+    for kind in uploaded_before:
+        fake.add_asset(
+            files[kind],
+            filename=f"photo-{kind}.jpg",
+            file_created_at=FILE_CREATED_AT,
+            file_modified_at=FILE_MODIFIED_AT,
+        )
     assert run.main(enhance=Stub()) == 0
-    assert len(fake.assets) == 2
-    assert [s["assetIds"] for s in fake.stacks] == [[earlier, original]]
-    assert fake.tag_names(earlier) == {"enhanced"}
+    assert len(fake.assets) == 3
+    new, pixel = copies(fake, original)
+    assert [s["assetIds"] for s in fake.stacks] == [[new, pixel, original]]
+    assert fake.tag_names(new) == {"enhanced"}
+    assert fake.tag_names(pixel) == {"pixel-x4"}
     assert fake.tag_names(original) == {"enhanced-source"}
-    assert earlier in fake.albums[album]["assetIds"]
+    assert {new, pixel} <= set(fake.albums[album]["assetIds"])
     # Looked up by checksum as Immich gives it: base64 of the SHA-1.
     searches = [e.get("json") for e in fake.log if e["path"] == "/api/search/metadata"]
-    assert {"checksum": immich_checksum(enhanced(b"photo"))} in searches
+    for kind in uploaded_before:
+        assert {"checksum": immich_checksum(files[kind])} in searches
     assert summary_of(capsys)["succeeded"] == 1
+
+
+def test_two_copies_that_are_the_same_file_are_stacked_once(fake, capsys):
+    # A flat picture, such as a blank white scan: the network adds nothing, both
+    # copies are the same JPEG, and Immich answers the second upload `duplicate`.
+    original = queue_photo(fake, b"blank")
+
+    def same_file(src: Path, dst_enhanced: Path, dst_pixel: Path, settings: Settings) -> object:
+        dst_enhanced.write_bytes(b"FLAT")
+        dst_pixel.write_bytes(b"FLAT")
+        return SimpleNamespace(scale=4, in_size=(40, 30), out_size=(160, 120), seconds=0.01)
+
+    assert run.main(enhance=same_file) == 0
+    (copy,) = [asset_id for asset_id in fake.assets if asset_id != original]
+    assert [s["assetIds"] for s in fake.stacks] == [[copy, original]]
+    assert fake.tag_names(copy) == {"enhanced", "pixel-x4"}
+    assert fake.tag_names(original) == {"enhanced-source"}
 
 
 def test_a_duplicate_that_search_cannot_see_is_parked_as_failed(fake, capsys, caplog):
@@ -624,9 +668,11 @@ def test_timeline_drift_is_warned_with_both_values_and_the_asset_still_succeeds(
     assert run.main(enhance=Stub()) == 0
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     drifted = [w for w in warnings if "localDateTime" in w]
-    assert len(drifted) == 1, warnings
-    assert LOCAL_DATE_TIME in drifted[0]
-    assert "2004-06-12T13:03:00.000Z" in drifted[0]
+    assert len(drifted) == 2, warnings  # one per copy
+    for new, warning in zip(copies(fake, original), drifted, strict=True):
+        assert new in warning
+        assert LOCAL_DATE_TIME in warning
+        assert "2004-06-12T13:03:00.000Z" in warning
     assert not [w for w in warnings if "fileCreatedAt" in w]
     assert summary_of(capsys)["succeeded"] == 1
 
@@ -663,7 +709,7 @@ def test_the_timeline_check_waits_for_immich_to_read_the_new_file(
 
     fake.on_detail = extraction
     assert run.main(enhance=Stub()) == 0
-    assert len(sleeps) == 2
+    assert len(sleeps) == 2 * 2  # each copy is read three times
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
@@ -677,9 +723,9 @@ def test_a_timeline_check_that_cannot_finish_says_so(fake, capsys, caplog):
 
     fake.on_detail = never_read
     assert run.main(enhance=Stub()) == 0
-    (new,) = [asset_id for asset_id in fake.assets if asset_id != original]
-    assert fake.calls().count(f"GET /api/assets/{new}") == run.TIMELINE_POLLS + 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert new in warnings[0]
-    assert "metadata" in warnings[0]
+    assert len(warnings) == 2  # one per copy
+    for new, warning in zip(copies(fake, original), warnings, strict=True):
+        assert fake.calls().count(f"GET /api/assets/{new}") == run.TIMELINE_POLLS + 1
+        assert new in warning
+        assert "metadata" in warning

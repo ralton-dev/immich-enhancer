@@ -21,11 +21,7 @@ A head-and-shoulders portrait, 160×120 pixels **as stored**, with no metadata.
 
 The rotation is deliberate. The contract test writes EXIF `Orientation 6` ("rotate 90°
 clockwise to display") and `DateTimeOriginal 2004:06:12 14:03:00` with `piexif` at setup.
-A viewer that honours the orientation then shows the face upright at **120×160**, and an
-upright ×4 enhancement is the **480×640** the test expects. If the stored pixels were
-already upright, Orientation 6 would turn the face onto its side, and the face pass would
-have nothing to find.
-
-Checked on 2026-10-23 with `facexlib` 0.3.0 (RetinaFace ResNet-50): on the upright 120×160
-image it detects exactly one face (box about 44×55 px, score 1.0). GFPGAN restores it and
-ParseNet pastes it back.
+A viewer that honours the orientation then shows the face upright at **120×160**, and both
+upright ×4 copies, the upscale and the pixel-doubled one, are the **480×640** the tests
+expect. Turned the wrong way, a copy is still 480×640, so the tests also compare its pixels
+with the upright fixture's.

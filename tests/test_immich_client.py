@@ -405,12 +405,13 @@ def test_upload_returns_a_duplicate_as_immich_answers_it(client, server, tmp_pat
 
 
 def test_create_stack_puts_the_first_id_on_top(client, server):
+    # The run's stack: the enhanced copy on top, the pixel copy, the original.
     server.route(
         "POST", "/api/stacks", reply(201, {"id": "s1", "primaryAssetId": "new", "assets": []})
     )
-    assert client.create_stack(["new", "orig"])["primaryAssetId"] == "new"
+    assert client.create_stack(["new", "pixel", "orig"])["primaryAssetId"] == "new"
     assert server.sent() == [
-        {"method": "POST", "path": "/api/stacks", "json": {"assetIds": ["new", "orig"]}}
+        {"method": "POST", "path": "/api/stacks", "json": {"assetIds": ["new", "pixel", "orig"]}}
     ]
 
 
@@ -421,10 +422,15 @@ def test_albums_for_asset_filters_by_asset(client, server):
 
 
 def test_add_to_album(client, server):
-    server.route("PUT", "/api/albums/al1/assets", reply(200, [{"id": "new", "success": True}]))
-    client.add_to_album("al1", ["new"])
+    # Both copies go in one call per album.
+    server.route(
+        "PUT",
+        "/api/albums/al1/assets",
+        reply(200, [{"id": "new", "success": True}, {"id": "pixel", "success": True}]),
+    )
+    client.add_to_album("al1", ["new", "pixel"])
     assert server.sent() == [
-        {"method": "PUT", "path": "/api/albums/al1/assets", "json": {"ids": ["new"]}}
+        {"method": "PUT", "path": "/api/albums/al1/assets", "json": {"ids": ["new", "pixel"]}}
     ]
 
 

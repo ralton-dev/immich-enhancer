@@ -2,9 +2,10 @@
 
     python -m immich_enhancer.run
 
-Order: settings, ping, server version, the key's permissions, the five tags,
-the queue. Then, for each queued asset: the skip rules, download, enhance,
-upload, stack, albums, tags, and a check that the copy landed where the
+Order: settings, ping, server version, the key's permissions, the six tags,
+the queue. Then, for each queued asset: the skip rules, download, enhance into
+two copies (the upscale and the pixel-doubled copy, plan decision 23), upload
+both, stack, albums, tags, and a check that each copy landed where the
 original is in the timeline. One JSON summary line goes to stdout at the end.
 
 Exit code (plan decision 12): 0 when the queue was empty or at least one asset
@@ -35,8 +36,9 @@ from .immich import KEY_PERMISSIONS, ImmichAuthError, ImmichClient, ImmichError
 
 log = logging.getLogger(__name__)
 
-# (src, dst, settings) -> a result with scale, faces, in_size, out_size, seconds.
-Enhance = Callable[[Path, Path, Settings], Any]
+# (src, dst_enhanced, dst_pixel, settings) -> a result with scale, in_size,
+# out_size and seconds: pipeline.enhance_file, or a test's stand-in.
+Enhance = Callable[[Path, Path, Path, Settings], Any]
 
 # Decision 10: JPEG and PNG only in v1. The value is the scratch file's suffix.
 SUPPORTED_TYPES = {"image/jpeg": ".jpg", "image/png": ".png"}
@@ -70,14 +72,18 @@ class Systemic(Exception):
 class Skip(Exception):
     """The pipeline cannot or need not improve this photo: a skip, not a
     failure. Either the file is not one it handles (decision 10: a WebP saved
-    as .jpg reaches it labelled image/jpeg), or its output would be a plain
-    re-encode of the original."""
+    as .jpg reaches it labelled image/jpeg), or it is too large to upscale, so
+    both copies would be re-encodes of the original (decision 24)."""
 
 
-def _is_unsupported(exc: BaseException) -> bool:
-    # pipeline.UnsupportedImageError, matched by name: importing the pipeline
-    # here would import torch into every run, and into the tests.
-    return any(cls.__name__ == "UnsupportedImageError" for cls in type(exc).__mro__)
+# The pipeline's refusals that are skips: UnsupportedImageError and
+# NothingToEnhanceError. Matched by class name, because importing the pipeline
+# here would import torch into every run, and into the tests.
+PIPELINE_SKIPS = ("UnsupportedImageError", "NothingToEnhanceError")
+
+
+def _is_pipeline_skip(exc: BaseException) -> bool:
+    return any(cls.__name__ in PIPELINE_SKIPS for cls in type(exc).__mro__)
 
 
 @dataclass
@@ -98,8 +104,11 @@ class Counts:
 
 @dataclass(frozen=True)
 class Tags:
+    """Tag ids, by the part each tag plays."""
+
     queue: str
     done: str
+    pixel: str
     source: str
     failed: str
     skipped: str
@@ -174,9 +183,16 @@ class Run:
         client.ping()
         client.version()
         self._check_key()
-        names = [s.queue_tag, s.done_tag, s.source_tag, s.failed_tag, s.skipped_tag]
-        ids = client.upsert_tags(names)
-        self.tags = Tags(*(ids[name] for name in names))
+        names = {
+            "queue": s.queue_tag,
+            "done": s.done_tag,
+            "pixel": s.pixel_tag,
+            "source": s.source_tag,
+            "failed": s.failed_tag,
+            "skipped": s.skipped_tag,
+        }
+        ids = client.upsert_tags(names.values())
+        self.tags = Tags(**{part: ids[name] for part, name in names.items()})
         queue = client.search_assets_by_tag(self.tags.queue)
         self.counts.queued = len(queue)
         log.info("%d asset(s) tagged %r", len(queue), s.queue_tag)
@@ -247,9 +263,14 @@ class Run:
         carried = {tag.get("id") for tag in detail.get("tags") or []}
 
         # Decision 11: our own work is never re-processed, even when re-tagged.
+        # The pixel copy is our work too (decision 23).
         ours = [
             name
-            for name, tag_id in ((s.source_tag, t.source), (s.done_tag, t.done))
+            for name, tag_id in (
+                (s.source_tag, t.source),
+                (s.done_tag, t.done),
+                (s.pixel_tag, t.pixel),
+            )
             if tag_id in carried
         ]
         if ours:
@@ -282,58 +303,71 @@ class Run:
     def _enhance(self, detail: dict, label: str, enhance: Enhance, carried: set) -> None:
         client, s, t = self.client, self.settings, self.tags
         asset_id = detail["id"]
-        src, dst = self._scratch(asset_id, SUPPORTED_TYPES[mime_type(detail)])
+        src, dst_enhanced, dst_pixel = self._scratch(asset_id, SUPPORTED_TYPES[mime_type(detail)])
         size = client.download(asset_id, src)
         log.info("asset %s: downloaded %d bytes", label, size)
         try:
-            result = enhance(src, dst, s)
+            result = enhance(src, dst_enhanced, dst_pixel, s)
         except Exception as exc:
-            if _is_unsupported(exc):
+            if _is_pipeline_skip(exc):
                 raise Skip(str(exc)) from exc
             raise
         log.info(
-            "asset %s enhanced: x%s, %s face(s), %s -> %s in %s s",
+            "asset %s enhanced: x%s, %s -> %s in %.1f s",
             label,
-            getattr(result, "scale", "?"),
-            getattr(result, "faces", "?"),
-            _size(getattr(result, "in_size", None)),
-            _size(getattr(result, "out_size", None)),
-            getattr(result, "seconds", "?"),
+            result.scale,
+            _size(result.in_size),
+            _size(result.out_size),
+            result.seconds,
         )
-        if getattr(result, "scale", None) == 1 and getattr(result, "faces", None) == 0:
-            # No upscale (over 4 MP, or held back by max_output_mp) and no face
-            # restored (none found, or the face pass is off): the output is a
-            # re-encode of the original, and stacked on top it would put a
-            # slightly worse copy in front of it.
-            raise Skip("nothing to enhance: no upscale at this size (x1) and no face restored")
         if s.dry_run:
             log.info("asset %s: dry run, so no upload, stack, album or tag", label)
             return
 
-        uploaded = client.upload(
-            dst,
-            filename=enhanced_name(detail),
-            file_created_at=detail["fileCreatedAt"],
-            file_modified_at=detail["fileModifiedAt"],
-            is_favorite=bool(detail.get("isFavorite")),
-        )
-        if uploaded.get("status") == "duplicate":
-            new_id = self._duplicate(dst, uploaded["id"], asset_id, label)
-        else:
-            new_id = uploaded["id"]
-            log.info("asset %s: uploaded the enhanced copy as %s", label, new_id)
-        client.create_stack([new_id, asset_id])
-        self._albums(asset_id, new_id, label)
-        client.tag_assets(t.done, [new_id])
+        # Both uploads first, so that a failure in either leaves no stack behind;
+        # a retry finds what did land through the duplicate path.
+        enhanced_id = self._upload(dst_enhanced, enhanced_name(detail), detail, "enhanced", label)
+        pixel_id = self._upload(dst_pixel, pixel_name(detail, result.scale), detail, "pixel", label)
+        # The enhanced copy on top (decision 3), the pixel copy next, the original
+        # underneath. dict.fromkeys drops a repeat: a picture so flat that the
+        # network added nothing would make the two copies the same file.
+        new_ids = list(dict.fromkeys((enhanced_id, pixel_id)))
+        client.create_stack([*new_ids, asset_id])
+        self._albums(asset_id, new_ids, label)
+        client.tag_assets(t.done, [enhanced_id])
+        client.tag_assets(t.pixel, [pixel_id])
         client.tag_assets(t.source, [asset_id])
         client.untag_assets(t.queue, [asset_id])
         for stale in (t.failed, t.skipped):  # left over from an earlier try
             if stale in carried:
                 client.untag_assets(stale, [asset_id])
-        log.info("asset %s: done, %s is stacked on top of it", label, new_id)
-        self._check_timeline(new_id, asset_id)
+        log.info(
+            "asset %s: done, stacked under %s (enhanced) and %s (pixel)",
+            label,
+            enhanced_id,
+            pixel_id,
+        )
+        for new_id in new_ids:
+            self._check_timeline(new_id, asset_id)
 
-    def _duplicate(self, path: Path, duplicate_id: str, original_id: str, label: str) -> str:
+    def _upload(self, path: Path, filename: str, detail: dict, kind: str, label: str) -> str:
+        """Upload one copy with the original's timestamps and favourite flag
+        (decision 4); its asset id, whether Immich created it or had it already."""
+        uploaded = self.client.upload(
+            path,
+            filename=filename,
+            file_created_at=detail["fileCreatedAt"],
+            file_modified_at=detail["fileModifiedAt"],
+            is_favorite=bool(detail.get("isFavorite")),
+        )
+        if uploaded.get("status") == "duplicate":
+            return self._duplicate(path, uploaded["id"], detail["id"], kind, label)
+        log.info("asset %s: uploaded the %s copy as %s", label, kind, uploaded["id"])
+        return uploaded["id"]
+
+    def _duplicate(
+        self, path: Path, duplicate_id: str, original_id: str, kind: str, label: str
+    ) -> str:
         """Immich already has these bytes, most likely from a run that died after
         its upload. Finish that asset's stack, albums and tags instead."""
         checksum = file_checksum(path)
@@ -341,38 +375,36 @@ class Run:
         if duplicate_id not in live:
             raise ImmichError(
                 "upload",
-                f"Immich says the enhanced file duplicates asset {duplicate_id}, but no live "
+                f"Immich says the {kind} copy duplicates asset {duplicate_id}, but no live "
                 f"asset has checksum {checksum}: it is probably in the trash. Restore it or "
                 f"empty the trash, then tag the original {self.settings.queue_tag!r} again.",
             )
         if duplicate_id == original_id:
-            raise ImmichError("upload", "the enhanced file is byte-identical to the original")
+            raise ImmichError("upload", f"the {kind} copy is byte-identical to the original")
         log.info(
-            "asset %s: Immich already has this enhanced file as %s; finishing its stack, "
-            "albums and tags",
+            "asset %s: Immich already has this %s copy as %s; finishing its stack, albums and tags",
             label,
+            kind,
             duplicate_id,
         )
         return duplicate_id
 
-    def _albums(self, original_id: str, new_id: str, label: str) -> None:
+    def _albums(self, original_id: str, new_ids: list[str], label: str) -> None:
         for album in self.client.albums_for_asset(original_id):
             name = album.get("albumName") or album.get("id")
             try:
-                self.client.add_to_album(album["id"], [new_id])
+                self.client.add_to_album(album["id"], new_ids)
             except ImmichAuthError:
                 raise
             except ImmichError as exc:
-                # A shared album Ben may only view, say. The copy is still stacked
-                # on its original, so this is a warning, not a failure.
-                log.warning(
-                    "asset %s: could not add the enhanced copy to album %r: %s", label, name, exc
-                )
+                # A shared album Ben may only view, say. The copies are still
+                # stacked on their original, so this is a warning, not a failure.
+                log.warning("asset %s: could not add the copies to album %r: %s", label, name, exc)
             else:
-                log.info("asset %s: added the enhanced copy to album %r", label, name)
+                log.info("asset %s: added the copies to album %r", label, name)
 
     def _check_timeline(self, new_id: str, original_id: str) -> None:
-        """The regression to fear: the copy must sit where its original sits in
+        """The regression to fear: a copy must sit where its original sits in
         the timeline. Warned about, never failed. Immich rewrites localDateTime
         and fileCreatedAt when it reads the new file, so wait for that first."""
         try:
@@ -398,7 +430,7 @@ class Run:
         for key in ("localDateTime", "fileCreatedAt"):
             if not same_instant(original.get(key), new.get(key)):
                 log.warning(
-                    "timeline drift: the enhanced copy %s has %s %s, but its original %s has %s",
+                    "timeline drift: the copy %s has %s %s, but its original %s has %s",
                     new_id,
                     key,
                     new.get(key),
@@ -434,11 +466,13 @@ class Run:
             self.enhance = enhance_file
         return self.enhance
 
-    def _scratch(self, asset_id: str, suffix: str) -> tuple[Path, Path]:
+    def _scratch(self, asset_id: str, suffix: str) -> tuple[Path, Path, Path]:
+        """The download, the enhanced copy and the pixel copy, all named
+        `<asset id>.*` so that _clean finds them."""
         work = Path(self.settings.work_dir)
         work.mkdir(parents=True, exist_ok=True)
         stem = _safe(asset_id)
-        return work / f"{stem}{suffix}", work / f"{stem}.enhanced.jpg"
+        return work / f"{stem}{suffix}", work / f"{stem}.enhanced.jpg", work / f"{stem}.pixel.jpg"
 
     def _clean(self, asset_id: str) -> None:
         work = Path(self.settings.work_dir)
@@ -478,8 +512,16 @@ def mime_type(detail: dict) -> str | None:
 
 def enhanced_name(detail: dict) -> str:
     """`IMG_0001.JPG` becomes `IMG_0001-enhanced.jpg`: the pipeline writes JPEG."""
-    stem = Path(detail.get("originalFileName") or "").stem or detail["id"]
-    return f"{stem}-enhanced.jpg"
+    return f"{_stem(detail)}-enhanced.jpg"
+
+
+def pixel_name(detail: dict, scale: int) -> str:
+    """`IMG_0001.JPG` becomes `IMG_0001-x4.jpg`, or `-x2` in the x2 band."""
+    return f"{_stem(detail)}-x{scale}.jpg"
+
+
+def _stem(detail: dict) -> str:
+    return Path(detail.get("originalFileName") or "").stem or detail["id"]
 
 
 def file_checksum(path: Path) -> str:

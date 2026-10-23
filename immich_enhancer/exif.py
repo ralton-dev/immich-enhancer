@@ -1,9 +1,9 @@
-"""EXIF for the enhanced JPEG: the original's block, upright, without its thumbnail.
+"""EXIF for the output JPEGs: the original's block, upright, without its thumbnail.
 
-The pipeline turns the pixels upright before it enhances them, so `Orientation`
+The pipeline turns the pixels upright before it enlarges them, so `Orientation`
 becomes 1. The embedded thumbnail shows the original, at the original's size, so
 it goes. Everything else is copied, the capture dates and GPS above all: Immich
-places the enhanced copy on the timeline and the map from them.
+places each copy on the timeline and the map from them.
 """
 
 from __future__ import annotations
@@ -29,15 +29,15 @@ def output_exif(original: bytes | None, size: tuple[int, int]) -> bytes | None:
     `original` is the block as Pillow reads it (`Image.info["exif"]`, from a
     JPEG's APP1 or a PNG's eXIf chunk), or None. `size` is the output's
     (width, height). A block piexif cannot read gives None and a warning rather
-    than an exception: the enhanced copy is still worth having, and its upload
-    carries the original's timestamps either way.
+    than an exception: the copy is still worth having, and its upload carries
+    the original's timestamps either way.
     """
     if not original:
         return None
     try:
         exif = piexif.load(original)
     except Exception as exc:  # struct.error, ValueError, InvalidImageDataError, ...
-        log.warning("original EXIF is unreadable, the enhanced copy carries none: %r", exc)
+        log.warning("original EXIF is unreadable, the copy carries none: %r", exc)
         return None
 
     exif["1st"] = {}
