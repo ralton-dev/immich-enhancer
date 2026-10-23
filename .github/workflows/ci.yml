@@ -1,0 +1,186 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# A newer push to a PR cancels its older run. On main every commit runs to the
+# end, so every commit gets its own sha-<sha> image.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ENHANCER_MODEL_DIR: ${{ github.workspace }}/models
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.15"
+
+      - name: Install (locked)
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+      - name: Format check
+        run: uv run --no-sync ruff format --check .
+
+      # Keyed on the sha256 list in fetch-weights.sh, so the cache changes only
+      # when a pinned weight does.
+      - name: Weights cache key
+        id: weights
+        run: |
+          key=$(grep -oE '\b[0-9a-f]{64}\b' scripts/fetch-weights.sh | sort | sha256sum | cut -c1-16)
+          echo "key=weights-$key" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: models
+          key: ${{ steps.weights.outputs.key }}
+
+      # Downloads on a cache miss; on a hit it only re-verifies every sha256.
+      - name: Fetch weights
+        run: scripts/fetch-weights.sh models
+
+      - name: Test
+        run: uv run --no-sync pytest
+
+  # Each architecture builds on its own native runner (no QEMU), pushing by
+  # digest only; `manifest` then joins the two digests under one tag. GitHub-
+  # hosted runners only: this repo is not in the homelab runner group and does
+  # not need to be (ubuntu-24.04-arm is free for public repos).
+  image:
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Prepare platform pair
+        id: prep
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # On a PR this builds and runs the in-image self-check without pushing.
+      # On main it pushes the single-platform image by digest, untagged.
+      - name: Build (push by digest on main)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/immich-enhancer,push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache-from: type=gha,scope=image-${{ steps.prep.outputs.pair }}
+          cache-to: type=gha,scope=image-${{ steps.prep.outputs.pair }},mode=max
+
+      - name: Export digest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ steps.prep.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Joins the per-platform digests into one manifest list and tags it
+  # sha-<full commit sha> and latest. Main only, so never a required check.
+  manifest:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/immich-enhancer
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: Create and push the manifest list
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/immich-enhancer
+        run: |
+          # shellcheck disable=SC2046  # intentional split: -t flags + digest refs
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      # The sha tag by name: metadata-action's `version` output would be
+      # `latest`, because type=raw outranks type=sha.
+      - name: Inspect
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/immich-enhancer
+          TAG: sha-${{ github.sha }}
+        run: docker buildx imagetools inspect "$IMAGE:$TAG"
+
+      # The deploy is a hand-written tag bump in homelab-k8s: say which tag
+      # this commit produced, where the bump's author will look.
+      - name: Summary
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/immich-enhancer
+          TAG: sha-${{ github.sha }}
+        run: |
+          {
+            echo "### Image"
+            echo
+            echo "\`$IMAGE:$TAG\` (linux/amd64 + linux/arm64), also tagged \`latest\`."
+            echo
+            echo "Deploy by bumping the CronJob's image in homelab-k8s to this tag, and \`APP_VERSION\` with it."
+          } >> "$GITHUB_STEP_SUMMARY"
