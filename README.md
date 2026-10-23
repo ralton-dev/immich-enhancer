@@ -131,7 +131,14 @@ multi-arch (`linux/amd64` and `linux/arm64`) and built on `python:3.12-slim`.
 - `HOME=/tmp`. `OMP_NUM_THREADS` is left for the CronJob to set.
 - The default command is `python -m immich_enhancer.run`. It is set as `CMD`, so
   `docker run <image> <command>` still works for inspection.
-- **Image size:** not measured yet.
+- **Image size**, measured on 2026-10-23 for `linux/arm64`:
+  - `docker image ls` reports **1.11 GB content size**, which is what a node pulls. It
+    reports 3.59 GB disk usage, because Docker Desktop's containerd store counts the
+    compressed layers and the unpacked copy together.
+  - Unpacked, the filesystem is **2.4 GB** (`du -sx /`): 1.4 GB Python environment (torch
+    alone is 652 MB), 615 MB of weights, and 204 MB of Mesa and LLVM pulled in by `libgl1`
+    for OpenCV.
+  - The amd64 image is built in CI, and its size will differ a little.
 
 ## How deployment happens
 
