@@ -67,6 +67,17 @@ class Systemic(Exception):
     """Not about one asset: stop the run and exit 1, leaving the rest queued."""
 
 
+class Unsupported(Exception):
+    """The pipeline found the file is not one it handles: a skip (decision 10),
+    not a failure. A WebP saved as .jpg reaches it labelled image/jpeg."""
+
+
+def _is_unsupported(exc: BaseException) -> bool:
+    # pipeline.UnsupportedImageError, matched by name: importing the pipeline
+    # here would import torch into every run, and into the tests.
+    return any(cls.__name__ == "UnsupportedImageError" for cls in type(exc).__mro__)
+
+
 @dataclass
 class Counts:
     succeeded: int = 0
@@ -252,14 +263,19 @@ class Run:
 
         reason = skip_reason(detail)
         if reason:
-            log.info("asset %s skipped: %s", label, reason)
-            if not s.dry_run:
-                client.tag_assets(t.skipped, [asset_id])
-                client.untag_assets(t.queue, [asset_id])
-            return "skipped"
-
-        self._enhance(detail, label, self._pipeline(), carried)
+            return self._skip(asset_id, label, reason)
+        try:
+            self._enhance(detail, label, self._pipeline(), carried)
+        except Unsupported as exc:
+            return self._skip(asset_id, label, str(exc))
         return "succeeded"
+
+    def _skip(self, asset_id: str, label: str, reason: str) -> str:
+        log.info("asset %s skipped: %s", label, reason)
+        if not self.settings.dry_run:
+            self.client.tag_assets(self.tags.skipped, [asset_id])
+            self.client.untag_assets(self.tags.queue, [asset_id])
+        return "skipped"
 
     def _enhance(self, detail: dict, label: str, enhance: Enhance, carried: set) -> None:
         client, s, t = self.client, self.settings, self.tags
@@ -267,7 +283,12 @@ class Run:
         src, dst = self._scratch(asset_id, SUPPORTED_TYPES[mime_type(detail)])
         size = client.download(asset_id, src)
         log.info("asset %s: downloaded %d bytes", label, size)
-        result = enhance(src, dst, s)
+        try:
+            result = enhance(src, dst, s)
+        except Exception as exc:
+            if _is_unsupported(exc):
+                raise Unsupported(str(exc)) from exc
+            raise
         log.info(
             "asset %s enhanced: x%s, %s face(s), %s -> %s in %s s",
             label,

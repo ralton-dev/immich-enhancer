@@ -317,6 +317,28 @@ def test_a_retagged_source_or_result_is_left_alone_and_the_stray_tag_removed(
     assert summary_of(capsys)["skipped"] == 1
 
 
+class UnsupportedImageError(ValueError):
+    """Stands in for pipeline.UnsupportedImageError, which run.py matches by name."""
+
+
+def test_a_file_the_pipeline_finds_unsupported_is_skipped_not_failed(fake, capsys, caplog):
+    # Immich labels a file by its extension: a WebP saved as .jpg arrives as image/jpeg.
+    caplog.set_level(logging.INFO)
+    webp = queue_photo(fake, b"RIFF....WEBP", name="saved-from-web.jpg")
+
+    def refuse(src: Path, dst: Path, settings: Settings) -> None:
+        raise UnsupportedImageError(f"{src.name} is WEBP; only JPEG and PNG are enhanced")
+
+    assert run.main(enhance=refuse) == 0
+    assert fake.tag_names(webp) == {"enhance-skipped"}
+    assert fake.uploads == []
+    assert any("WEBP" in r.getMessage() and r.levelno == logging.INFO for r in caplog.records), (
+        caplog.text
+    )
+    summary = summary_of(capsys)
+    assert (summary["skipped"], summary["failed"], summary["exit_code"]) == (1, 0, 0)
+
+
 # -- failures and exit codes (decision 12) ---------------------------------------
 
 
