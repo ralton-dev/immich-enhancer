@@ -141,9 +141,10 @@ a read-only root filesystem and a writable `emptyDir` at `/tmp`.
 
 ### The API key
 
-Create the key in Immich (Account Settings → API Keys) with: **asset read, view, download,
-upload; stack create, read; tag create, read, asset; album read and asset-add**. The run's
-error messages quote this same list, `KEY_PERMISSIONS` in `immich_enhancer/immich.py`.
+Create the key in Immich (Account Settings → API Keys) with: **asset.read, asset.download,
+asset.upload, stack.create, album.read, albumAsset.create, tag.create, tag.asset**, and
+nothing else: these are the permissions the run uses. The run's error messages quote this
+same list, `KEY_PERMISSIONS` in `immich_enhancer/immich.py`.
 
 Before its first write, the run reads the key's permissions with `GET /api/api-keys/me` and
 stops, naming each one that is missing. It requires `asset.read`, `asset.download`,

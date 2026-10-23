@@ -34,10 +34,12 @@ PING_TIMEOUT_S = 5.0
 SUPPORTED_MAJOR = 3
 QUEUE_PAGE_SIZE = 100
 
-# What the README tells Ben to grant when he creates the key.
+# What Ben grants when he creates the key, quoted by every auth error and by the
+# README: exactly the permissions the run checks for (run.NEEDED_PERMISSIONS)
+# and the calls below use, nothing more.
 KEY_PERMISSIONS = (
-    "asset read, view, download, upload; stack create, read; "
-    "tag create, read, asset; album read and asset-add"
+    "asset.read, asset.download, asset.upload, stack.create, "
+    "album.read, albumAsset.create, tag.create, tag.asset"
 )
 
 TIMEOUT = httpx.Timeout(60.0, connect=10.0)

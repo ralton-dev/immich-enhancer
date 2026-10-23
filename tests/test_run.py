@@ -481,6 +481,13 @@ def test_a_key_missing_a_permission_exits_1_before_any_asset_is_touched(fake, ca
     assert "tag.asset" in error
 
 
+def test_the_key_ben_creates_has_exactly_the_permissions_the_run_checks():
+    # Least privilege: the list in every "create the key with" message is the
+    # preflight's list, nothing more (asset.view, stack.read and tag.read are unused).
+    assert immich.KEY_PERMISSIONS.split(", ") == list(run.NEEDED_PERMISSIONS)
+    assert NEEDED == list(run.NEEDED_PERMISSIONS)
+
+
 def test_a_permission_refused_mid_run_stops_the_run_and_exits_1(fake, capsys):
     # A server that cannot say what the key may do: the refusal comes from the
     # call itself, and it is about the key, not the photo.
