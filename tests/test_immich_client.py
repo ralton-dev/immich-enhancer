@@ -117,6 +117,13 @@ def test_ping_retries_until_pong(client, server, sleeps):
     assert sleeps == [5.0, 5.0]
 
 
+def test_a_pong_is_logged(client, server, caplog):
+    caplog.set_level(logging.INFO)
+    server.route("GET", "/api/server/ping", reply(200, {"res": "pong"}))
+    client.ping()
+    assert "Immich answered ping" in caplog.text
+
+
 def test_ping_gives_up_after_six_tries(client, server, sleeps):
     server.route("GET", "/api/server/ping", reply(503, {"message": "starting"}))
     with pytest.raises(ImmichError) as raised:

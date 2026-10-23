@@ -100,8 +100,9 @@ class ImmichClient:
                 if 400 <= response.status_code < 500:
                     self._raise_for("ping", "GET", "/server/ping", None, response)
                 if response.is_success and _json(response).get("res") == "pong":
-                    if attempt > 1:
-                        log.info("Immich answered ping on attempt %d", attempt)
+                    log.info(
+                        "Immich answered ping%s", f" on attempt {attempt}" if attempt > 1 else ""
+                    )
                     return
                 last = f"HTTP {response.status_code} {_server_message(response)}"
             log.info("ping %d/%d failed: %s", attempt, self._ping_attempts, last)
