@@ -1,47 +1,53 @@
 """Build-time self-check. The Dockerfile runs it as uid 1000 with no network.
 
 It fails the image build, rather than the first CronJob run, when the image
-cannot do its job offline: a native library missing under cv2, a weight that
-is missing or unreadable by uid 1000, or a model that no longer loads from
-/opt/models (facexlib would otherwise try to download it, and the pod has no
-internet).
+cannot do its job offline: a weight that is missing or unreadable by uid 1000,
+a native library one of the job's imports needs, or a model that no longer
+loads from /opt/models. It imports the job's own modules and runs each
+upscaler through the real pipeline on a small picture, so what it proves is
+what the CronJob runs.
 """
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
+from immich_enhancer.config import SR_MODELS, Settings  # standard library only
+
 MODELS = Path(os.environ.get("ENHANCER_MODEL_DIR", "/opt/models"))
-WEIGHTS = [
-    "RealESRGAN_x4plus.pth",
-    "realesr-general-x4v3.pth",
-    "GFPGANv1.4.pth",
-    "facexlib/detection_Resnet50_Final.pth",
-    "facexlib/parsing_parsenet.pth",
-]
+WEIGHTS = [f"{name}.pth" for name in SR_MODELS]
 
 unreadable = [w for w in WEIGHTS if not os.access(MODELS / w, os.R_OK)]
 if unreadable:
     sys.exit(f"selfcheck: missing or unreadable as uid {os.getuid()}: {unreadable}")
 
-import cv2  # noqa: E402  (needs libGL and libgthread from the runtime stage)
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
-from facexlib.utils.face_restoration_helper import FaceRestoreHelper  # noqa: E402
-from spandrel import ModelLoader  # noqa: E402
+from PIL import Image  # noqa: E402
 
-for name in WEIGHTS[:3]:
-    model = ModelLoader().load_from_file(MODELS / name)
-    print(f"selfcheck: {name}: {model.architecture.name} x{model.scale} {model.purpose}")
+import immich_enhancer.run  # noqa: E402, F401  (the CronJob's entry point)
+from immich_enhancer.pipeline import enhance_file  # noqa: E402
 
-# Loads detection_Resnet50_Final.pth and parsing_parsenet.pth from model_rootpath.
-FaceRestoreHelper(
-    upscale_factor=2,
-    face_size=512,
-    model_rootpath=str(MODELS / "facexlib"),
-    use_parse=True,
-    det_model="retinaface_resnet50",
-)
+with tempfile.TemporaryDirectory() as tmp:
+    work = Path(tmp)
+    src = work / "in.png"
+    gradient = np.linspace(0, 255, 40 * 30 * 3).reshape(30, 40, 3).astype(np.uint8)
+    Image.fromarray(gradient).save(src)
+    for name in SR_MODELS:
+        settings = Settings(
+            immich_api_key="selfcheck",
+            app_version="selfcheck",
+            sr_model=name,
+            model_dir=str(MODELS),
+            work_dir=tmp,
+        )
+        result = enhance_file(src, work / f"{name}.jpg", work / f"{name}-x4.jpg", settings)
+        print(
+            f"selfcheck: {name}: x{result.scale} {result.in_size} -> {result.out_size} "
+            f"in {result.seconds:.1f} s"
+        )
 print(
     f"selfcheck: ok as uid {os.getuid()}: torch {torch.__version__}, "
-    f"opencv {cv2.__version__}, five weights loaded with no network"
+    f"{len(WEIGHTS)} weights loaded and run with no network"
 )

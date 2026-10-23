@@ -1,7 +1,7 @@
 [project]
 name = "immich-enhancer"
 version = "0.1.0"
-description = "Batch job that upscales and face-restores low-res photos tagged in Immich, stacking the result on the original"
+description = "Batch job that upscales low-res photos tagged in Immich and stacks the upscale and a pixel-doubled copy on the original"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
@@ -12,11 +12,9 @@ dependencies = [
     # PyPI wheels pull in the CUDA toolkit, about 2 GB the CronJob never uses.
     "torch==2.14.1",
     "torchvision==0.29.1",
-    # Loads Real-ESRGAN and GFPGAN weights without the basicsr / realesrgan /
-    # gfpgan packages, which break on every torchvision >= 0.17.
+    # Loads the Real-ESRGAN weights without the basicsr / realesrgan packages,
+    # which break on every torchvision >= 0.17.
     "spandrel==0.4.2",
-    # Face detection (RetinaFace) and parsing (ParseNet) for the face pass.
-    "facexlib==0.3.0",
     "pillow==13.0.0",
     "piexif==1.1.3",
     "httpx==0.28.1",

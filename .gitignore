@@ -1,5 +1,5 @@
 # Model weights are fetched by scripts/fetch-weights.sh and baked into the
-# image. They are never committed: ~350 MB of binaries, pinned by sha256.
+# image. They are never committed: about 72 MB of binaries, pinned by sha256.
 /models/
 *.pth
 

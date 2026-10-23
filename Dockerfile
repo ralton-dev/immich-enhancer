@@ -27,14 +27,9 @@ RUN --mount=type=bind,source=scripts/fetch-weights.sh,target=/tmp/fetch-weights.
     bash /tmp/fetch-weights.sh /opt/models
 
 # -- 3. Runtime -----------------------------------------------------------------
+# No system packages beyond the slim base: nothing the job imports links a
+# library it lacks. The self-check at the end proves that on every build.
 FROM python:3.12-slim
-
-# opencv-python, which facexlib depends on, links libGL and libgthread. The slim
-# image has neither, and `import cv2` fails without them. Debian 13 (trixie)
-# renamed libglib2.0-0 to libglib2.0-0t64.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends libgl1 libglib2.0-0t64 \
- && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps /opt/venv /opt/venv
 COPY --from=weights /opt/models /opt/models
@@ -58,11 +53,13 @@ ENV PATH=/opt/venv/bin:$PATH \
 USER 1000:1000
 
 # Fail here rather than in the first run: as uid 1000, with no network, import
-# everything and load all five weights from /opt/models.
+# the job and run both upscalers from /opt/models through its pipeline.
+# PYTHONPATH for this step only: Python puts a script's own directory on
+# sys.path, not the working directory where the package is.
 RUN --network=none \
     --mount=type=tmpfs,target=/tmp \
     --mount=type=bind,source=scripts/selfcheck.py,target=/opt/selfcheck.py \
-    python /opt/selfcheck.py
+    PYTHONPATH=/app python /opt/selfcheck.py
 
 # CMD rather than ENTRYPOINT, so `docker run <image> <command>` still works for
 # inspection. The CronJob sets neither, so this is what it runs.
