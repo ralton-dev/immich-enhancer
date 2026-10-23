@@ -14,9 +14,7 @@ After `run.main()`:
   carries `enhanced`;
 - the new asset was added to the original's one album.
 
-WP-C lands this as xfail(strict=True), because nothing in `immich_enhancer`
-exists yet. WP-B removes the marker as part of its acceptance and changes
-nothing else. The test runs the real pipeline, so the weights must be in
+The test runs the real pipeline, so the weights must be in
 `ENHANCER_MODEL_DIR` (CI fetches them; locally see the README).
 """
 
@@ -33,7 +31,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import piexif
-import pytest
 from PIL import Image
 from werkzeug import Request, Response
 
@@ -331,7 +328,6 @@ class FakeImmich:
         return self._json(200, results)
 
 
-@pytest.mark.xfail(strict=True, reason="red pin — see plan")
 def test_tagged_asset_becomes_stacked_enhanced_sibling(httpserver, monkeypatch, tmp_path):
     original_bytes = tagged_fixture()
     fake = FakeImmich(api_key=API_KEY)
