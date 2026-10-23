@@ -1,0 +1,60 @@
+[project]
+name = "immich-enhancer"
+version = "0.1.0"
+description = "Batch job that upscales and face-restores low-res photos tagged in Immich, stacking the result on the original"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+# Every version is pinned. This file is a choke point for the plan's work
+# packages: only WP-C edits it, the others report a missing dependency instead.
+dependencies = [
+    # CPU-only builds from download.pytorch.org (see [tool.uv.sources]). The
+    # PyPI wheels pull in the CUDA toolkit, about 2 GB the CronJob never uses.
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+    # Loads Real-ESRGAN and GFPGAN weights without the basicsr / realesrgan /
+    # gfpgan packages, which break on every torchvision >= 0.17.
+    "spandrel==0.4.2",
+    # Face detection (RetinaFace) and parsing (ParseNet) for the face pass.
+    "facexlib==0.3.0",
+    "pillow==13.0.0",
+    "piexif==1.1.3",
+    "httpx==0.28.1",
+    "numpy==2.5.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-httpserver==1.2.0",
+    "ruff==0.17.2",
+]
+
+[tool.uv]
+# An application, not a library: nothing is built or installed from this
+# directory. The image copies immich_enhancer/ next to the environment.
+package = false
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+# Only the packages pinned to it above come from this index; everything else
+# resolves from PyPI.
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["-ra", "--strict-markers"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
