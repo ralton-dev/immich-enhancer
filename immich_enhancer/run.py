@@ -67,9 +67,11 @@ class Systemic(Exception):
     """Not about one asset: stop the run and exit 1, leaving the rest queued."""
 
 
-class Unsupported(Exception):
-    """The pipeline found the file is not one it handles: a skip (decision 10),
-    not a failure. A WebP saved as .jpg reaches it labelled image/jpeg."""
+class Skip(Exception):
+    """The pipeline cannot or need not improve this photo: a skip, not a
+    failure. Either the file is not one it handles (decision 10: a WebP saved
+    as .jpg reaches it labelled image/jpeg), or its output would be a plain
+    re-encode of the original."""
 
 
 def _is_unsupported(exc: BaseException) -> bool:
@@ -266,7 +268,7 @@ class Run:
             return self._skip(asset_id, label, reason)
         try:
             self._enhance(detail, label, self._pipeline(), carried)
-        except Unsupported as exc:
+        except Skip as exc:
             return self._skip(asset_id, label, str(exc))
         return "succeeded"
 
@@ -287,7 +289,7 @@ class Run:
             result = enhance(src, dst, s)
         except Exception as exc:
             if _is_unsupported(exc):
-                raise Unsupported(str(exc)) from exc
+                raise Skip(str(exc)) from exc
             raise
         log.info(
             "asset %s enhanced: x%s, %s face(s), %s -> %s in %s s",
@@ -298,6 +300,11 @@ class Run:
             _size(getattr(result, "out_size", None)),
             getattr(result, "seconds", "?"),
         )
+        if getattr(result, "scale", None) == 1 and getattr(result, "faces", None) == 0:
+            # Over 4 MP the pipeline only restores faces, and it found none: the
+            # output is a re-encode of the original, and stacked on top it would
+            # put a slightly worse copy in front of it.
+            raise Skip("nothing to enhance: larger than 4 MP and no face found")
         if s.dry_run:
             log.info("asset %s: dry run, so no upload, stack, album or tag", label)
             return

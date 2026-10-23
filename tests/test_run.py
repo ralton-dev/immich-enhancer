@@ -339,6 +339,65 @@ def test_a_file_the_pipeline_finds_unsupported_is_skipped_not_failed(fake, capsy
     assert (summary["skipped"], summary["failed"], summary["exit_code"]) == (1, 0, 0)
 
 
+NOTHING_TO_ENHANCE = "nothing to enhance: larger than 4 MP and no face found"
+
+
+def returning(result: object) -> Callable[[Path, Path, Settings], object]:
+    """A pipeline stand-in that writes an output and answers `result`."""
+
+    def enhance(src: Path, dst: Path, settings: Settings) -> object:
+        dst.write_bytes(enhanced(src.read_bytes()))
+        return result
+
+    return enhance
+
+
+def test_a_x1_result_with_no_faces_is_skipped_not_stacked(fake, capsys, caplog):
+    # Over 4 MP the pipeline only restores faces. With none found, its output is
+    # a re-encode of the original, and stacked on top it would hide the better file.
+    caplog.set_level(logging.INFO)
+    big = queue_photo(fake, b"over-4-MP-and-no-face")
+    plain = SimpleNamespace(
+        scale=1, faces=0, in_size=(5000, 4000), out_size=(5000, 4000), seconds=40.0
+    )
+    assert run.main(enhance=returning(plain)) == 0
+    assert fake.tag_names(big) == {"enhance-skipped"}
+    assert fake.uploads == []
+    assert fake.stacks == []
+    assert any(NOTHING_TO_ENHANCE in r.getMessage() for r in caplog.records), caplog.text
+    summary = summary_of(capsys)
+    assert (summary["processed"], summary["skipped"], summary["succeeded"]) == (1, 1, 0)
+    assert (summary["failed"], summary["exit_code"]) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        SimpleNamespace(scale=1, faces=2),  # faces restored: worth having
+        SimpleNamespace(scale=2, faces=0),  # upscaled: worth having
+        object(),  # nothing to judge by: uploaded as usual
+    ],
+    ids=["x1-with-faces", "x2-without-faces", "no-attributes"],
+)
+def test_any_other_result_is_still_stacked(fake, capsys, result):
+    photo = queue_photo(fake, b"photo")
+    assert run.main(enhance=returning(result)) == 0
+    assert fake.tag_names(photo) == {"enhanced-source"}
+    assert len(fake.uploads) == 1
+    assert len(fake.stacks) == 1
+
+
+def test_dry_run_logs_the_nothing_to_enhance_decision(fake, capsys, caplog, monkeypatch):
+    monkeypatch.setenv("ENHANCER_DRY_RUN", "true")
+    caplog.set_level(logging.INFO)
+    big = queue_photo(fake, b"over-4-MP-and-no-face")
+    assert run.main(enhance=returning(SimpleNamespace(scale=1, faces=0))) == 0
+    assert any(NOTHING_TO_ENHANCE in r.getMessage() for r in caplog.records), caplog.text
+    assert changes(fake) == []
+    assert fake.tag_names(big) == {"enhance"}
+    assert summary_of(capsys)["skipped"] == 1
+
+
 # -- failures and exit codes (decision 12) ---------------------------------------
 
 
