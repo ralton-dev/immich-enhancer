@@ -247,14 +247,16 @@ multi-arch (`linux/amd64` and `linux/arm64`) and built on `python:3.12-slim`.
 
 1. Push to `main`. CI tests, builds both architectures on GitHub-hosted runners, and pushes
    `sha-<full commit sha>` and `latest`. The run summary names the tag.
-2. A person bumps the CronJob's image tag, and `APP_VERSION` with it, in the
-   [homelab-k8s](https://github.com/ralton-dev/homelab-k8s) repo, then commits.
+2. A person bumps the CronJob's image tag, and `APP_VERSION` with it, in the private
+   [`bralton/homelab-k8s`](https://github.com/bralton/homelab-k8s) repo (readers of this
+   README cannot open it), then commits.
 3. Argo CD applies it within a few minutes. The CronJob runs hourly within waking hours.
 
 Nothing here deploys itself, and a merge to `main` is not a release, so the running version
 can be behind `main`. The Kubernetes side (CronJob, ConfigMap, sealed API key,
 NetworkPolicies) is planned with `/jarvis-homelab-app plan`, run from this repo. That plan
-lands in homelab-k8s as `INITIAL_IMPLEMENTATION_PLANS/immich-enhancer.md`. What the cluster
+lands in the same private repo, `bralton/homelab-k8s`, at
+`INITIAL_IMPLEMENTATION_PLANS/immich-enhancer.md`. What the cluster
 requires of this repo is in [`docs/homelab-deployment.md`](docs/homelab-deployment.md).
 
 ## Development
