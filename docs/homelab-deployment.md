@@ -54,17 +54,18 @@ The image already meets that (`Dockerfile`):
 - final stage `USER 1000:1000`, with no `USER root` and no startup chown or chmod;
 - every file root-owned and world-readable;
 - `HOME=/tmp`;
-- a final build step that runs as uid 1000, with no network, and loads all five weights.
+- a final build step that runs as uid 1000, with no network, and runs both upscalers through
+  the job's own pipeline.
 
 The code keeps to it:
 
 - It writes only under `ENHANCER_WORK_DIR` (default `/tmp/enhancer`). That is where the
-  download and the enhanced JPEG go (`run.py`, `_scratch`); the JPEG is written to a `.part`
+  download and the two JPEGs go (`run.py`, `_scratch`); each JPEG is written to a `.part`
   file first and renamed (`pipeline.py`, `_write`). Each asset's files are deleted when it is
   done (`run.py`, `_clean`). Anything outside `/tmp` would fail on the read-only filesystem.
-- It passes `model_rootpath=<ENHANCER_MODEL_DIR>/facexlib` to facexlib, after checking that
-  both of facexlib's weights are there (`pipeline.py`, `_face_helper`). facexlib therefore
-  never tries a download, which would hang: the pod has no internet.
+- It loads weights only from `ENHANCER_MODEL_DIR`, and a missing one is an error that names
+  the file (`pipeline.py`, `_load_spandrel`). Nothing in the job tries a download, which
+  would hang: the pod has no internet.
 
 ## 5. Configuration is environment variables only: met
 
@@ -99,7 +100,7 @@ update check, and no model download. The weights are in the image.
 ## 9. Tracing: not emitted
 
 The job emits no OpenTelemetry. Its observability is its stdout, which Loki collects: one
-log line per enhanced photo (`enhanced scale=… faces=… seconds=… peak_rss_mib=…`) and one
+log line per enhanced photo (`enhanced scale=… in=… out=… seconds=… peak_rss_mib=…`) and one
 JSON summary line per run. The Job's exit status completes the picture.
 
 ## 11. How deployment actually happens: met
@@ -123,7 +124,7 @@ not apply: this job has no database and receives no traffic.
 - [x] No `homelab-arm64`, so no runner-group step
 - [x] Exit code per the rule in §3, and `APP_VERSION` in the summary line
 - [x] Image runs as uid 1000, tolerates a read-only root and an unwritable `$HOME`
-- [x] Code writes only under `/tmp`, and passes `model_rootpath` to facexlib
+- [x] Code writes only under `/tmp`, and loads weights only from the image, never downloading
 - [x] Every setting documented as an env var, with defaults and secret flag
 - [x] `config.py` fails loudly on a missing required variable; booleans are exactly `"true"`
 - [x] Every inbound and outbound network path enumerated in the README
