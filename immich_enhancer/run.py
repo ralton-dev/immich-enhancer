@@ -301,10 +301,11 @@ class Run:
             getattr(result, "seconds", "?"),
         )
         if getattr(result, "scale", None) == 1 and getattr(result, "faces", None) == 0:
-            # Over 4 MP the pipeline only restores faces, and it found none: the
-            # output is a re-encode of the original, and stacked on top it would
-            # put a slightly worse copy in front of it.
-            raise Skip("nothing to enhance: larger than 4 MP and no face found")
+            # No upscale (over 4 MP, or held back by max_output_mp) and no face
+            # restored (none found, or the face pass is off): the output is a
+            # re-encode of the original, and stacked on top it would put a
+            # slightly worse copy in front of it.
+            raise Skip("nothing to enhance: no upscale at this size (x1) and no face restored")
         if s.dry_run:
             log.info("asset %s: dry run, so no upload, stack, album or tag", label)
             return

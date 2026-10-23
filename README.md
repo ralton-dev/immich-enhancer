@@ -32,8 +32,8 @@ One run, in order (`immich_enhancer/run.py`):
    - a photo the job could only re-encode. It gets no upscaling (over 4 MP, or held back by
      `ENHANCER_MAX_OUTPUT_MP`) and no face is restored in it, because none was found or the
      face pass is off. A plain re-encode stacked in front of the original would only put a
-     slightly worse copy on top. The log says "nothing to enhance: larger than 4 MP and no
-     face found".
+     slightly worse copy on top. The log says "nothing to enhance: no upscale at this size
+     (x1) and no face restored".
 
    The last two are known only after the pipeline has run. Apart from the first case, a
    skipped asset moves from `enhance` to `enhance-skipped` and the reason is logged.

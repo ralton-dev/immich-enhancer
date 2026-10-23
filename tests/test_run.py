@@ -339,7 +339,9 @@ def test_a_file_the_pipeline_finds_unsupported_is_skipped_not_failed(fake, capsy
     assert (summary["skipped"], summary["failed"], summary["exit_code"]) == (1, 0, 0)
 
 
-NOTHING_TO_ENHANCE = "nothing to enhance: larger than 4 MP and no face found"
+# True whatever the cause: over 4 MP, or held back by ENHANCER_MAX_OUTPUT_MP; no
+# face found, or ENHANCER_FACE_RESTORE off.
+NOTHING_TO_ENHANCE = "nothing to enhance: no upscale at this size (x1) and no face restored"
 
 
 def returning(result: object) -> Callable[[Path, Path, Settings], object]:
