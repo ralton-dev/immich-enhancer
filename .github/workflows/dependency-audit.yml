@@ -1,0 +1,66 @@
+# GitHub-hosted, independent of Dependabot alerts (including pnpm 12 graph gaps).
+# Complete JSON reports are retained; no dependency installation in JS audits.
+---
+name: Dependency audit
+"on":
+  schedule:
+    - cron: 49 5 * * *
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - "**/requirements*.txt"
+      - ".github/workflows/dependency-audit.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - "**/requirements*.txt"
+      - ".github/workflows/dependency-audit.yml"
+permissions:
+  contents: read
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Install isolated, pinned auditor with verified pip bootstrap
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-tools"
+          "$RUNNER_TEMP/audit-tools/bin/python" -m pip install --no-cache-dir --upgrade "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+          "$RUNNER_TEMP/audit-tools/bin/python" -m pip install 'pip-audit==2.10.1'
+      - name: Audit resolved transitive Python dependencies (all findings fail)
+        run: |
+          # Audit all transitive locked versions without downloading Torch or model weights.
+          # Normalize +cpu local versions to their public release only for advisory lookup.
+          python - <<'PYLOCK'
+          from pathlib import Path
+          import tomllib
+          lock = tomllib.loads(Path('uv.lock').read_text())
+          versions = sorted({f"{p['name']}=={p['version'].split('+')[0]}" for p in lock['package'] if 'version' in p and not p.get('source', {}).get('virtual')})
+          Path('audit-requirements.txt').write_text('\n'.join(versions) + '\n')
+          print(f'Auditing {len(versions)} locked package versions')
+          PYLOCK
+          "$RUNNER_TEMP/audit-tools/bin/pip-audit" -r audit-requirements.txt --no-deps --disable-pip --progress-spinner off -f json -o python-audit.json
+      - name: Retain complete audit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: python-dependency-audit
+          path: |-
+            python-audit.json
+            audit-*requirements.txt
+          retention-days: 30
+          if-no-files-found: error

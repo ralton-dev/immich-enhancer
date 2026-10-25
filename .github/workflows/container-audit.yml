@@ -1,0 +1,86 @@
+# GitHub-hosted security maintenance; no publishing, deployment, or automerge.
+---
+name: Published container audit
+"on":
+  schedule:
+    - cron: 32 6 * * 6
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: container-audit-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ghcr.io/ralton-dev/immich-enhancer:latest
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Resolve and record the published image digest
+        env:
+          IMAGE: "${{ matrix.image }}"
+          PLATFORM: "${{ matrix.platform }}"
+        run: |
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' > image-manifest.json
+          python3 - <<'PYDIGEST'
+          import json, os
+          from pathlib import Path
+          manifest = json.loads(Path('image-manifest.json').read_text())
+          image_os, architecture = os.environ['PLATFORM'].split('/')
+          matches = [m for m in manifest.get('manifests', []) if m.get('platform', {}).get('os') == image_os and m.get('platform', {}).get('architecture') == architecture]
+          if len(matches) != 1:
+              raise SystemExit('Published index does not have exactly one matching platform manifest.')
+          digest = matches[0]['digest']
+          reference = os.environ['IMAGE'].rsplit(':', 1)[0] + '@' + digest
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'SCAN_IMAGE={reference}\n')
+          Path('scanned-image.json').write_text(json.dumps({'published_tag': os.environ['IMAGE'], 'index_digest': manifest['digest'], 'platform': os.environ['PLATFORM'], 'scanned_reference': reference}, indent=2) + '\n')
+          print(f'Scanning published image {reference} ({os.environ["PLATFORM"]}); this does not identify a running deployment.')
+          PYDIGEST
+      - name: Scan the complete immutable image (including unfixed findings)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        with:
+          version: v0.76.1
+          image-ref: "${{ env.SCAN_IMAGE }}"
+          format: json
+          output: container-audit.json
+          exit-code: "0"
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          scanners: vuln
+          cache: false
+        env:
+          TRIVY_PLATFORM: "${{ matrix.platform }}"
+      - name: Fail on fixable high or critical vulnerabilities
+        run: |
+          python3 - <<'PYGATE'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('container-audit.json').read_text())
+          if 'Results' not in report:
+              raise SystemExit('Incomplete image audit report; inspect the artifact.')
+          findings = [v for result in report['Results'] or [] for v in result.get('Vulnerabilities', []) or []]
+          blocking = [v for v in findings if v.get('Severity') in {'HIGH', 'CRITICAL'} and v.get('FixedVersion')]
+          print(f'Complete image report: {len(findings)} findings; {len(blocking)} fixable high/critical findings.')
+          for v in blocking:
+              print(v['VulnerabilityID'], v.get('PkgName'), v.get('InstalledVersion'), 'fixed:', v['FixedVersion'])
+          raise SystemExit(1 if blocking else 0)
+          PYGATE
+      - name: Retain complete audit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: container-audit-${{ strategy.job-index }}
+          path: |-
+            container-audit.json
+            image-manifest.json
+            scanned-image.json
+          retention-days: 30
+          if-no-files-found: error
