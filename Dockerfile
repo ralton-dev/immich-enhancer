@@ -4,9 +4,17 @@
 # uid 1000. At runtime the image talks to Immich and nothing else: every weight
 # the pipeline loads is under /opt/models, verified by sha256 at build time.
 
+# Refresh both independent trust stores before downloading dependencies. The
+# Python PSRT wheel hash makes the pip bootstrap safe even with an older base.
+FROM python:3.12-slim AS base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir --upgrade "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+
 # -- 1. Python dependencies, exactly as locked ---------------------------------
-FROM python:3.12-slim AS deps
-COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /usr/local/bin/uv
+FROM base AS deps
+COPY --from=ghcr.io/astral-sh/uv:0.13.4 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -19,7 +27,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
 # -- 2. Model weights, pinned by sha256 -----------------------------------------
-FROM python:3.12-slim AS weights
+FROM base AS weights
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
@@ -27,9 +35,9 @@ RUN --mount=type=bind,source=scripts/fetch-weights.sh,target=/tmp/fetch-weights.
     bash /tmp/fetch-weights.sh /opt/models
 
 # -- 3. Runtime -----------------------------------------------------------------
-# No system packages beyond the slim base: nothing the job imports links a
-# library it lacks. The self-check at the end proves that on every build.
-FROM python:3.12-slim
+# No additional runtime packages beyond the certificate-refreshed base.
+# The self-check at the end proves that nothing the job imports is missing.
+FROM base
 
 COPY --from=deps /opt/venv /opt/venv
 COPY --from=weights /opt/models /opt/models
