@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":timezone(Europe/London)",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies"],
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 5,
+  "automerge": false,
+  "platformAutomerge": false,
+  "rebaseWhen": "behind-base-branch",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"],
+    "automerge": false
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [],
+    "dependencyDashboardApproval": false,
+    "minimumReleaseAge": null,
+    "prCreation": "immediate",
+    "automerge": false,
+    "groupName": null,
+    "addLabels": ["security"]
+  },
+  "packageRules": [
+    {
+      "description": "One weekly reviewed PR for routine minor, patch and digest updates.",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "routine updates",
+      "automerge": false
+    },
+    {
+      "description": "Major updates require explicit dashboard approval and separate review.",
+      "matchUpdateTypes": ["major"],
+      "groupName": null,
+      "dependencyDashboardApproval": true,
+      "automerge": false,
+      "addLabels": ["major-update"]
+    }
+  ],
+  "dependencyDashboardTitle": "Renovate Dashboard — immich-enhancer"
+}
