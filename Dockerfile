@@ -46,17 +46,17 @@ COPY immich_enhancer/ ./immich_enhancer/
 
 # HOME=/tmp: the pod's root filesystem is read-only with an emptyDir at /tmp,
 # and libraries that cache under $HOME must not fail on it.
-# PIP_PYTHON: the venv has no pip of its own, so this points the base image's
-# pip at it. Without it, `pip list` here lists the system site-packages and
-# says nothing about what the app runs.
 # OMP_NUM_THREADS is deliberately left unset. The CronJob sets it, and a
 # default here would hide a manifest that forgot to.
 ENV PATH=/opt/venv/bin:$PATH \
     VIRTUAL_ENV=/opt/venv \
-    PIP_PYTHON=/opt/venv/bin/python \
     HOME=/tmp \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+# pip and its bundled tooling are needed only to build the locked environment;
+# use the base interpreter because PATH now selects the pip-free app venv.
+RUN /usr/local/bin/python -m pip uninstall --yes pip
 
 USER 1000:1000
 

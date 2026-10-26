@@ -227,8 +227,8 @@ packages are not used.
 multi-arch (`linux/amd64` and `linux/arm64`) and built on `python:3.12-slim`.
 
 - PyTorch is a CPU-only build from `download.pytorch.org/whl/cpu`; no CUDA or `nvidia-*`
-  package is installed. `pip list` inside the image lists the app's own environment
-  (`PIP_PYTHON` points the base image's pip at it).
+  package is installed. The runtime keeps no pip installer; inspect installed package
+  metadata with `docker run --rm --entrypoint python <image> -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] for d in m.distributions())))'`.
 - It runs as uid/gid `1000:1000`. All files are root-owned and world-readable, and nothing
   chowns at startup.
 - `HOME=/tmp`. `OMP_NUM_THREADS` is left for the CronJob to set.
