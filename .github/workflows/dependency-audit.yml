@@ -35,6 +35,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
+          check-latest: true
           python-version: "3.12"
       - name: Install isolated, pinned auditor with verified pip bootstrap
         run: |
