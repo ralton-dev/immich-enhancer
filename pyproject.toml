@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Batch job that upscales low-res photos tagged in Immich and stacks the upscale and a pixel-doubled copy on the original"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.15,<3.16"
 # Every version is pinned. This file is a choke point for the plan's work
 # packages: only WP-C edits it, the others report a missing dependency instead.
 dependencies = [
