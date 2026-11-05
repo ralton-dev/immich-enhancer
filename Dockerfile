@@ -14,7 +14,7 @@ RUN python -m pip install --no-cache-dir --upgrade "pip @ https://files.pythonho
 
 # -- 1. Python dependencies, exactly as locked ---------------------------------
 FROM base AS deps
-COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
